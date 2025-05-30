@@ -33,9 +33,9 @@ public class Child
                 
                 Console.WriteLine($"client connected: {socket.RemoteEndPoint}");
                 
-                socket.Receive(buf);
+                var len = socket.Receive(buf);
                 
-                Console.WriteLine($"client data: {Encoding.UTF8.GetString(buf)}");
+                Console.WriteLine($"client data: len = {len}, content = {Encoding.UTF8.GetString(buf[0..len])}");
                 
                 socket.Close();
                 socket.Dispose();
