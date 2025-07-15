@@ -19,14 +19,32 @@ public class Child
             return;
         }
 
-        var buf = new byte[1024];
+        var buf = new byte[4096];
+        try
+        {
+            int len;
+            // 持续读取，直到客户端断开（len == 0）或出错
+            while ((len = socket.Receive(buf)) > 0)
+            {
+                Console.WriteLine($"client data: len = {len}");
+                socket.Send(buf, len, SocketFlags.None);
+            }
 
-        var len = socket.Receive(buf);
-
-        Console.WriteLine($"client data: len = {len}");
-
-        socket.Close();
-        socket.Dispose();
+            Console.WriteLine("Client closed connection");
+        }
+        catch (SocketException se)
+        {
+            Console.WriteLine($"Socket error: {se.Message}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in client handler: {ex.Message}");
+        }
+        finally
+        {
+            socket.Close();
+            socket.Dispose();
+        }
     }
 
     private static Socket? ListeningSocket { get; set; }
