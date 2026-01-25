@@ -22,7 +22,7 @@ TinyProxy.NET 是使用 .NET 10 完整重写 [tinyproxy](https://github.com/tiny
 
 | 技术 | 用途 |
 |------|------|
-| `System.IO.Pipelines` | 流处��、零拷贝缓冲 |
+| `System.IO.Pipelines` | 流处理、零拷贝缓冲 |
 | `System.Net.Sockets` | 底层 Socket 操作 |
 | `MemoryPool<T>` / `ArrayPool<T>` | 缓冲区池化 |
 | `ValueTask` | 减少异步分配 |
