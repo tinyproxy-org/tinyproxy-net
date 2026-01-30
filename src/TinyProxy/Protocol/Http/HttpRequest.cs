@@ -121,4 +121,20 @@ public sealed class HttpRequest
     }
 
     public bool HasHeader(string name) => Headers.ContainsKey(name);
+
+    /// <summary>
+    /// Creates a copy of the request with a modified URI.
+    /// </summary>
+    public HttpRequest WithUri(string newUri) => new()
+    {
+        Method = Method,
+        Uri = newUri,
+        Version = Version,
+        Headers = Headers,
+        Body = Body,
+        Host = Host,
+        UserAgent = UserAgent,
+        ContentType = ContentType,
+        ContentLength = ContentLength
+    };
 }

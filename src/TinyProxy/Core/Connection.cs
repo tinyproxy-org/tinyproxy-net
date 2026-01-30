@@ -137,6 +137,54 @@ public sealed class Connection : IDisposable
                 _logger.LogInfo($"{firstRequest.Method} {firstRequest.Uri}");
             }
 
+            // Check if this is a reverse proxy request
+            if (_config.IsReverseProxyEnabled && _config.ReversePaths.Count > 0)
+            {
+                var reverseProxy = new Protocol.ReverseProxy(_logger, _config, _stats, _accessLogger, _clientIp);
+                var handled = await reverseProxy.TryHandleAsync(this, firstRequest, token);
+                if (handled)
+                {
+                    return;
+                }
+            }
+
+            // Check if this is a transparent proxy request
+            // In transparent mode, we need to determine the destination from the socket
+            if (_config.IsTransparentProxyEnabled)
+            {
+                var transparentProxy = new Protocol.TransparentProxy(_logger, _config);
+                var dest = transparentProxy.GetTransparentDestination(_clientSocket, firstRequest);
+
+                if (dest == null)
+                {
+                    _stats.IncrementFailedRequests();
+                    await Protocol.HtmlErrorPages.BadRequestAsync(
+                        _clientSocket,
+                        "Unable to determine destination in transparent proxy mode",
+                        token);
+                    LogAccess(firstRequest, 400, 0);
+                    return;
+                }
+
+                // Rewrite the request URI with the transparent destination
+                var newUri = transparentProxy.BuildAbsoluteUri(firstRequest.Uri, dest.Value.host, dest.Value.port, firstRequest.Uri);
+                firstRequest = firstRequest.WithUri(newUri);
+
+                if (_config.Verbose)
+                {
+                    _logger.LogInfo($"Transparent proxy resolved to: {firstRequest.Uri}");
+                }
+            }
+
+            // Check if this is a statistics page request
+            if (!string.IsNullOrEmpty(_config.StatHost) && IsStatPageRequest(firstRequest))
+            {
+                var statsHandler = new Protocol.StatsHandler(_logger, _config, _stats);
+                await statsHandler.HandleStatsPageAsync(_clientSocket, token);
+                LogAccess(firstRequest, 200, 0);
+                return;
+            }
+
             // Route based on method
             if (firstRequest.Method == Protocol.Http.HttpMethod.Connect)
             {
@@ -254,6 +302,39 @@ public sealed class Connection : IDisposable
             }
         }
         return -1;
+    }
+
+    /// <summary>
+    /// Checks if the request is for the statistics page.
+    /// Aligns with tinyproxy C's statpage functionality in stats.c.
+    /// </summary>
+    private bool IsStatPageRequest(HttpRequest request)
+    {
+        if (string.IsNullOrEmpty(_config.StatHost))
+        {
+            return false;
+        }
+
+        // Check if the Host header matches StatHost
+        foreach (var kvp in request.Headers)
+        {
+            if (string.Equals(kvp.Key, "Host", StringComparison.OrdinalIgnoreCase))
+            {
+                var hostBytes = kvp.Value.ToArray();
+                var host = System.Text.Encoding.ASCII.GetString(hostBytes);
+
+                // Exact match or hostname match (without port)
+                if (string.Equals(host, _config.StatHost, StringComparison.OrdinalIgnoreCase) ||
+                    host.StartsWith(_config.StatHost + ":", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                break;
+            }
+        }
+
+        return false;
     }
 
     private void LogAccess(HttpRequest request, int statusCode, long bytesSent)

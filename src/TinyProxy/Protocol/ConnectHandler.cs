@@ -204,6 +204,10 @@ public sealed class ConnectHandler
         return (toServer, toClient);
     }
 
+    /// <summary>
+    /// Copies data between sockets with optimized buffer sizing.
+    /// Uses larger buffer (64KB) for better throughput on high-speed networks.
+    /// </summary>
     private async Task<long> CopyDataAsync(
         Socket source,
         Socket destination,
@@ -211,7 +215,10 @@ public sealed class ConnectHandler
         ReadOnlySequence<byte> initialData,
         CancellationToken token)
     {
-        var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        // Use larger buffer for tunnel data transfer
+        const int TunnelBufferSize = 65536;
+
+        var buffer = ArrayPool<byte>.Shared.Rent(TunnelBufferSize);
         long totalBytes = 0;
 
         try
@@ -232,6 +239,12 @@ public sealed class ConnectHandler
             {
                 totalBytes += received;
                 await destination.SendAsync(buffer.AsMemory(0, received), SocketFlags.None, token).ConfigureAwait(false);
+
+                // Cooperative yield for fairness under high load
+                if (received > 32768)
+                {
+                    await Task.Yield();
+                }
             }
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException)

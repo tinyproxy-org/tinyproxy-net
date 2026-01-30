@@ -1,0 +1,244 @@
+using System.Buffers;
+using System.Net;
+using System.Net.Sockets;
+using TinyProxy.Config;
+using TinyProxy.Core;
+using TinyProxy.Logging;
+using TinyProxy.Protocol.Http;
+
+namespace TinyProxy.Protocol;
+
+/// <summary>
+/// Handles transparent proxy mode.
+/// Aligns with tinyproxy C's transparent-proxy.c
+///
+/// Transparent proxy requires firewall configuration (iptables/pf) to redirect
+/// traffic to the proxy without client configuration. The proxy determines the
+/// original destination using getsockname() on the client socket.
+/// </summary>
+public sealed class TransparentProxy
+{
+    private readonly ILogger _logger;
+    private readonly Configuration _config;
+
+    public TransparentProxy(ILogger logger, Configuration config)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+    }
+
+    /// <summary>
+    /// Extracts the target destination from a transparent proxy connection.
+    /// Aligns with tinyproxy C's do_transparent_proxy() function.
+    /// </summary>
+    /// <param name="clientSocket">The client socket (connection was redirected by firewall)</param>
+    /// <param name="request">The parsed HTTP request</param>
+    /// <returns>The target host and port, or null if unable to determine</returns>
+    public (string host, int port)? GetTransparentDestination(Socket clientSocket, HttpRequest request)
+    {
+        // First, check if the request has a Host header
+        var hostHeader = GetHostHeader(request.Headers);
+        if (!string.IsNullOrEmpty(hostHeader))
+        {
+            if (TryParseHostPort(hostHeader, out var host, out var port))
+            {
+                if (_config.Verbose)
+                {
+                    _logger.LogInfo($"Transparent proxy using Host header: {host}:{port}");
+                }
+                return (host, port);
+            }
+        }
+
+        // No Host header, use getsockname() to get the original destination
+        // This is the key to transparent proxy - the firewall redirected the connection
+        // to us, but the socket still knows the original destination
+        if (TryGetOriginalDestination(clientSocket, out var destHost, out var destPort))
+        {
+            // Prevent connections to the proxy itself
+            if (IsLocalAddress(destHost))
+            {
+                _logger.LogWarning($"Transparent proxy destination {destHost} is local, rejecting");
+                return null;
+            }
+
+            if (_config.Verbose)
+            {
+                _logger.LogInfo($"Transparent proxy using getsockname: {destHost}:{destPort}");
+            }
+
+            return (destHost, destPort);
+        }
+
+        _logger.LogWarning("Transparent proxy unable to determine destination");
+        return null;
+    }
+
+    /// <summary>
+    /// Extracts the Host header from the request headers.
+    /// </summary>
+    private static string? GetHostHeader(IDictionary<string, ReadOnlySequence<byte>> headers)
+    {
+        foreach (var kvp in headers)
+        {
+            if (string.Equals(kvp.Key, "Host", StringComparison.OrdinalIgnoreCase))
+            {
+                // Convert ReadOnlySequence<byte> to string
+                var length = (int)kvp.Value.Length;
+                var buffer = new byte[length];
+                kvp.Value.CopyTo(buffer);
+                return System.Text.Encoding.ASCII.GetString(buffer);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Parses a host:port string.
+    /// Handles "example.com", "example.com:80", "[::1]:8080" formats.
+    /// </summary>
+    private static bool TryParseHostPort(string hostHeader, out string host, out int port)
+    {
+        host = string.Empty;
+        port = 80; // Default HTTP port
+
+        if (string.IsNullOrWhiteSpace(hostHeader))
+        {
+            return false;
+        }
+
+        // Handle IPv6 addresses: [::1]:port or [::1]
+        if (hostHeader.StartsWith('['))
+        {
+            var bracketEnd = hostHeader.IndexOf(']');
+            if (bracketEnd < 0)
+            {
+                return false;
+            }
+
+            host = hostHeader.Substring(1, bracketEnd - 1);
+
+            if (bracketEnd + 1 < hostHeader.Length && hostHeader[bracketEnd + 1] == ':')
+            {
+                var portStr = hostHeader.Substring(bracketEnd + 2);
+                if (!int.TryParse(portStr, out port) || port <= 0 || port > 65535)
+                {
+                    port = 80;
+                }
+            }
+        }
+        else
+        {
+            // Handle IPv4 or hostname:port
+            var colonIndex = hostHeader.LastIndexOf(':');
+            if (colonIndex > 0) // Ensure : is not at the start (IPv6 without brackets)
+            {
+                var portStr = hostHeader.Substring(colonIndex + 1);
+                if (int.TryParse(portStr, out var parsedPort) && parsedPort > 0 && parsedPort <= 65535)
+                {
+                    port = parsedPort;
+                    host = hostHeader.Substring(0, colonIndex);
+                }
+                else
+                {
+                    host = hostHeader;
+                }
+            }
+            else
+            {
+                host = hostHeader;
+            }
+        }
+
+        return !string.IsNullOrEmpty(host);
+    }
+
+    /// <summary>
+    /// Gets the original destination address using getsockname().
+    /// This only works when the connection was redirected by firewall rules (iptables REDIRECT, pf rdr, etc.).
+    /// Aligns with tinyproxy C's use of getsockname() in do_transparent_proxy().
+    /// </summary>
+    private bool TryGetOriginalDestination(Socket clientSocket, out string host, out int port)
+    {
+        host = string.Empty;
+        port = 0;
+
+        try
+        {
+            var endPoint = clientSocket.LocalEndPoint as IPEndPoint;
+            if (endPoint == null)
+            {
+                return false;
+            }
+
+            // In transparent proxy mode, LocalEndPoint gives us the ORIGINAL destination
+            // (not the proxy's listening address) because of the firewall redirect
+            host = endPoint.Address.ToString();
+            port = endPoint.Port;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"GetOriginalDestination error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Checks if the given address is a local address (proxy's listen address).
+    /// Prevents loops where client tries to connect to the proxy itself.
+    /// Aligns with tinyproxy C's check against listen_addrs.
+    /// </summary>
+    private bool IsLocalAddress(string host)
+    {
+        // Check against configured listen addresses
+        if (_config.ListenAddress != null)
+        {
+            try
+            {
+                var listenIp = IPAddress.Parse(_config.ListenAddress);
+                var checkIp = IPAddress.Parse(host);
+
+                if (listenIp.Equals(checkIp))
+                {
+                    return true;
+                }
+
+                // Check for loopback
+                if (IPAddress.IsLoopback(checkIp))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Parse failed, ignore
+            }
+        }
+
+        // Also check common local addresses
+        return host is "127.0.0.1" or "::1" or "localhost";
+    }
+
+    /// <summary>
+    /// Builds an absolute URI for transparent proxy requests.
+    /// Transparent proxy requests may be in relative form (without scheme),
+    /// so we need to construct the full URL.
+    /// </summary>
+    public string BuildAbsoluteUri(string requestUri, string host, int port, string? path)
+    {
+        // If the request URI is already absolute, use it as-is
+        if (requestUri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            requestUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return requestUri;
+        }
+
+        // Build absolute URI from components
+        // Omit port for standard HTTP port (80) - matches tinyproxy C behavior
+        var portSuffix = (port == 80) ? "" : $":{port}";
+        var pathStr = path ?? requestUri;
+
+        return $"http://{host}{portSuffix}{pathStr}";
+    }
+}

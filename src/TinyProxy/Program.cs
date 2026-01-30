@@ -11,21 +11,41 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        var config = LoadConfiguration(args);
-        var logger = new ConsoleLogger();
+        var configPath = GetConfigPath(args);
+        var config = LoadConfiguration(configPath);
+
+        // Create logger (syslog if configured, otherwise console)
+        var logger = CreateLogger(config);
+
+        logger.LogInfo($"TinyProxy.NET starting on {config.ListenAddress}:{config.ListenPort}");
+
         var stats = new Stats();
         var accessLogger = new AccessLogger(config, logger);
         var connectionManager = new ConnectionManager(config, logger);
 
-        logger.LogInfo($"TinyProxy.NET starting on {config.ListenAddress}:{config.ListenPort}");
+        // PID file management - aligns with tinyproxy C's pidfile
+        var pidFileManager = new PidFileManager(logger, config.PidFile);
+
+        // Configuration hot-reload - aligns with tinyproxy C's SIGHUP handling
+        Configuration? currentConfig = config;
+        var configReloader = new ConfigReloader(logger, configPath, newConfig =>
+        {
+            currentConfig = newConfig;
+            // In production, you'd want to update the connection manager and other components
+            logger.LogInfo("Configuration reloaded");
+        });
+        // ConfigReloader starts automatically in constructor
+
+        // Use a wrapper for config access that can be updated
+        var configAccessor = new ConfigurationAccessor(() => currentConfig);
 
         var eventLoop = new EventLoop(
-            IPAddress.Parse(config.ListenAddress),
-            config.ListenPort,
-            (socket) => HandleConnectionAsync(socket, config, logger, stats, accessLogger),
+            IPAddress.Parse(currentConfig.ListenAddress),
+            currentConfig.ListenPort,
+            (socket) => HandleConnectionAsync(socket, configAccessor, logger, stats, accessLogger),
             logger,
             connectionManager,
-            config
+            currentConfig
         );
 
         eventLoop.Start();
@@ -38,7 +58,7 @@ class Program
         {
             e.Cancel = true;
             logger.LogInfo($"Shutting down... Final stats: {stats.GetSnapshot()}");
-            await CleanupAsync(eventLoop, accessLogger);
+            await CleanupAsync(eventLoop, accessLogger, configReloader, pidFileManager);
             tcs.TrySetResult(true);
         };
 
@@ -46,62 +66,32 @@ class Program
         AppDomain.CurrentDomain.ProcessExit += (s, e) =>
         {
             // ProcessExit is synchronous, do sync cleanup
-            Cleanup(eventLoop, accessLogger);
+            Cleanup(eventLoop, accessLogger, configReloader, pidFileManager);
         };
 
         await tcs.Task;
     }
 
-    private static async Task CleanupAsync(EventLoop eventLoop, AccessLogger accessLogger)
-    {
-        try
-        {
-            eventLoop?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error during event loop disposal: {ex.Message}");
-        }
-
-        try
-        {
-            accessLogger?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error during access logger disposal: {ex.Message}");
-        }
-
-        // Ensure we yield back to the call context
-        await Task.Yield();
-    }
-
-    private static void Cleanup(EventLoop eventLoop, AccessLogger accessLogger)
-    {
-        try
-        {
-            eventLoop?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error during event loop disposal: {ex.Message}");
-        }
-
-        try
-        {
-            accessLogger?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error during access logger disposal: {ex.Message}");
-        }
-    }
-
-    private static Configuration LoadConfiguration(string[] args)
+    private static string GetConfigPath(string[] args)
     {
         // Check for config file argument
-        var configPath = args.FirstOrDefault(a => !a.StartsWith("-")) ?? "tinyproxy.conf";
+        // Supports: -c filename or just filename
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "-c" && i + 1 < args.Length)
+            {
+                return args[i + 1];
+            }
+            if (!args[i].StartsWith("-"))
+            {
+                return args[i];
+            }
+        }
+        return "tinyproxy.conf";
+    }
 
+    private static Configuration LoadConfiguration(string configPath)
+    {
         if (File.Exists(configPath))
         {
             return ConfigParser.LoadFromFile(configPath);
@@ -111,9 +101,108 @@ class Program
         return Configuration.Default;
     }
 
+    private static ILogger CreateLogger(Configuration config)
+    {
+        if (config.UseSyslog)
+        {
+            // TODO: Get syslog server from config
+            return new SyslogLogger();
+        }
+        return new ConsoleLogger();
+    }
+
+    private static async Task CleanupAsync(
+        EventLoop eventLoop,
+        AccessLogger accessLogger,
+        ConfigReloader configReloader,
+        PidFileManager pidFileManager)
+    {
+        try
+        {
+            eventLoop?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during event loop disposal: {ex.Message}");
+        }
+
+        try
+        {
+            accessLogger?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during access logger disposal: {ex.Message}");
+        }
+
+        try
+        {
+            configReloader?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during config reloader disposal: {ex.Message}");
+        }
+
+        try
+        {
+            pidFileManager?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during PID file manager disposal: {ex.Message}");
+        }
+
+        // Ensure we yield back to the call context
+        await Task.Yield();
+    }
+
+    private static void Cleanup(
+        EventLoop eventLoop,
+        AccessLogger accessLogger,
+        ConfigReloader configReloader,
+        PidFileManager pidFileManager)
+    {
+        try
+        {
+            eventLoop?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during event loop disposal: {ex.Message}");
+        }
+
+        try
+        {
+            accessLogger?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during access logger disposal: {ex.Message}");
+        }
+
+        try
+        {
+            configReloader?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during config reloader disposal: {ex.Message}");
+        }
+
+        try
+        {
+            pidFileManager?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during PID file manager disposal: {ex.Message}");
+        }
+    }
+
     private static async ValueTask HandleConnectionAsync(
         Socket socket,
-        Configuration config,
+        ConfigurationAccessor configAccessor,
         ILogger logger,
         Stats stats,
         AccessLogger accessLogger)
@@ -122,6 +211,9 @@ class Program
 
         try
         {
+            // Get current config (supports hot-reload)
+            var config = configAccessor.GetCurrent();
+
             using var connection = new Connection(socket, logger, config, stats, accessLogger);
             await connection.ProcessAsync();
         }
@@ -129,5 +221,21 @@ class Program
         {
             stats.DecrementActiveConnections();
         }
+    }
+
+    /// <summary>
+    /// Provides thread-safe access to the current configuration.
+    /// Allows configuration to be updated without restarting the service.
+    /// </summary>
+    private sealed class ConfigurationAccessor
+    {
+        private readonly Func<Configuration> _getConfig;
+
+        public ConfigurationAccessor(Func<Configuration> getConfig)
+        {
+            _getConfig = getConfig ?? throw new ArgumentNullException(nameof(getConfig));
+        }
+
+        public Configuration GetCurrent() => _getConfig();
     }
 }

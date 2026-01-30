@@ -113,13 +113,100 @@ public sealed record Configuration
     public bool IsAnonymousEnabled => AnonymousAllowedHeaders.Count > 0;
 
     /// <summary>
+    /// Gets whether transparent proxy mode is enabled.
+    /// When enabled, the proxy operates in transparent mode where client requests
+    /// are redirected by firewall rules (iptables, pf, etc.) without client configuration.
+    /// The proxy determines the original destination using getsockname().
+    /// Aligns with tinyproxy C's TRANSPARENT_PROXY.
+    /// </summary>
+    public bool IsTransparentProxyEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Gets whether reverse proxy mode is enabled.
+    /// Aligns with tinyproxy C's REVERSE_SUPPORT.
+    /// </summary>
+    public bool IsReverseProxyEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Gets the reverse proxy path mappings.
+    /// Maps local paths to upstream URLs.
+    /// Aligns with tinyproxy C's reversepath_list.
+    /// </summary>
+    public List<ReversePathConfig> ReversePaths { get; init; } = new();
+
+    /// <summary>
+    /// Gets whether reverse proxy "magic" cookie tracking is enabled.
+    /// When enabled, the proxy uses a special cookie to track which reverse path
+    /// a client is using.
+    /// Aligns with tinyproxy C's reversemagic.
+    /// </summary>
+    public bool ReverseMagicEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Gets the reverse base URL for rewriting redirects.
+    /// Aligns with tinyproxy C's reversebaseurl.
+    /// </summary>
+    public string? ReverseBaseUrl { get; init; }
+
+    /// <summary>
+    /// Gets the addresses to bind outgoing connections to.
+    /// When set, outgoing connections to servers will use these source addresses.
+    /// Aligns with tinyproxy C's bind_addrs / BindSame.
+    /// </summary>
+    public HashSet<string> BindAddresses { get; init; } = new();
+
+    /// <summary>
+    /// Gets whether to bind outgoing connections to the incoming interface IP.
+    /// Aligns with tinyproxy C's bindsame.
+    /// </summary>
+    public bool BindSame { get; init; } = false;
+
+    /// <summary>
+    /// Gets the statistics page host.
+    /// When accessed, shows runtime statistics.
+    /// Aligns with tinyproxy C's statpage.
+    /// </summary>
+    public string? StatHost { get; init; }
+
+    /// <summary>
+    /// Gets the PID file path for writing the process ID.
+    /// Aligns with tinyproxy C's pidfile.
+    /// </summary>
+    public string? PidFile { get; init; }
+
+    /// <summary>
+    /// Gets whether to use syslog for logging.
+    /// Aligns with tinyproxy C's syslog.
+    /// </summary>
+    public bool UseSyslog { get; init; } = false;
+
+    /// <summary>
     /// Creates a default configuration.
     /// </summary>
     public static Configuration Default => new();
 }
 
 /// <summary>
+/// Reverse proxy path configuration.
+/// Aligns with tinyproxy C's reversepath struct.
+/// </summary>
+public sealed record ReversePathConfig
+{
+    /// <summary>
+    /// Gets the local path prefix (e.g., "/app").
+    /// </summary>
+    public required string Path { get; init; }
+
+    /// <summary>
+    /// Gets the upstream URL to map to (e.g., "http://backend:8080").
+    /// </summary>
+    public required string Url { get; init; }
+}
+
+/// <summary>
 /// Upstream proxy configuration.
+/// Supports HTTP, SOCKS4, and SOCKS5 proxies.
+/// Aligns with tinyproxy C's upstream struct with proxy_type.
 /// </summary>
 public sealed record UpstreamProxyConfig
 {
@@ -127,6 +214,46 @@ public sealed record UpstreamProxyConfig
     public required ushort Port { get; init; }
     public string? Username { get; init; }
     public string? Password { get; init; }
+
+    /// <summary>
+    /// Gets the upstream proxy type.
+    /// Aligns with tinyproxy C's proxy_type enum.
+    /// </summary>
+    public UpstreamProxyType Type { get; init; } = UpstreamProxyType.Http;
+
+    /// <summary>
+    /// Gets the domain pattern for matching requests to this upstream proxy.
+    /// When null, this is the default upstream proxy for all requests.
+    /// Aligns with tinyproxy C's upstream->target (hostspec).
+    /// </summary>
+    public string? Domain { get; init; }
+}
+
+/// <summary>
+/// Upstream proxy type.
+/// Aligns with tinyproxy C's proxy_type enum.
+/// </summary>
+public enum UpstreamProxyType
+{
+    /// <summary>
+    /// No proxy (direct connection).
+    /// </summary>
+    None,
+
+    /// <summary>
+    /// HTTP proxy.
+    /// </summary>
+    Http,
+
+    /// <summary>
+    /// SOCKS4 proxy.
+    /// </summary>
+    Socks4,
+
+    /// <summary>
+    /// SOCKS5 proxy.
+    /// </summary>
+    Socks5
 }
 
 /// <summary>

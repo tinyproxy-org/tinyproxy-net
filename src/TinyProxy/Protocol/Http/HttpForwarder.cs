@@ -1,11 +1,13 @@
 using System.Buffers;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using TinyProxy.Config;
 using TinyProxy.Core;
 using TinyProxy.Filter;
 using TinyProxy.Logging;
 using TinyProxy.Metrics;
+using TinyProxy.Protocol;
 
 namespace TinyProxy.Protocol.Http;
 
@@ -79,9 +81,26 @@ public sealed class HttpForwarder
             else
             {
                 serverSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+
+                // Apply BindSame if enabled - aligns with tinyproxy C's bindsame
+                serverSocket.BindToSameIp(connection.ClientSocket, _config);
+
+                // Apply BindAddresses if configured
+                if (_config.BindAddresses.Count > 0)
+                {
+                    var bindAddress = _config.BindAddresses.FirstOrDefault();
+                    if (!string.IsNullOrEmpty(bindAddress))
+                    {
+                        await serverSocket.ConnectAndBindAsync(
+                            host, port, _config.Timeout, bindAddress, token).ConfigureAwait(false);
+                        goto Connected;
+                    }
+                }
+
                 await serverSocket.ConnectAsync(host, port, _config.Timeout, token).ConfigureAwait(false);
             }
 
+        Connected:
             try
             {
                 // Build modified request
@@ -134,7 +153,14 @@ public sealed class HttpForwarder
     {
         var upstream = _config.UpstreamProxy!;
 
-        // Connect to upstream proxy
+        // Handle SOCKS upstream proxies
+        if (upstream.Type == UpstreamProxyType.Socks4 || upstream.Type == UpstreamProxyType.Socks5)
+        {
+            var socksProxy = new SocksUpstreamProxy(_logger, upstream, _config.Timeout);
+            return await socksProxy.ConnectAsync(targetHost, targetPort, token).ConfigureAwait(false);
+        }
+
+        // HTTP upstream proxy
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
         await socket.ConnectAsync(upstream.Host, upstream.Port, _config.Timeout, token).ConfigureAwait(false);
 
@@ -226,9 +252,18 @@ public sealed class HttpForwarder
         }
     }
 
+    /// <summary>
+    /// Forwards response data from server to client with optimized buffer sizing.
+    /// Uses larger buffer (64KB) to reduce system calls for better throughput.
+    /// Aligns with tinyproxy C's buffer management but with .NET optimizations.
+    /// </summary>
     private async Task<(long sent, long received)> ForwardResponseAsync(Socket server, Socket client, CancellationToken token)
     {
-        var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        // Use larger buffer for better throughput on high-speed networks
+        // 64KB is a sweet spot between memory usage and system call overhead
+        const int OptimalBufferSize = 65536;
+
+        var buffer = ArrayPool<byte>.Shared.Rent(OptimalBufferSize);
         long totalSent = 0;
         long totalReceived = 0;
 
@@ -238,13 +273,84 @@ public sealed class HttpForwarder
             while ((received = await server.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false)) > 0)
             {
                 totalReceived += received;
+
+                // Send all data in one call (most NICs can handle this efficiently)
                 await client.SendAsync(buffer.AsMemory(0, received), SocketFlags.None, token).ConfigureAwait(false);
                 totalSent += received;
+
+                // Cooperative yield for fairness under high load
+                if (received > 32768)
+                {
+                    await Task.Yield();
+                }
             }
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        return (totalSent, totalReceived);
+    }
+
+    /// <summary>
+    /// Alternative implementation using SendAsync with list buffers for very large responses.
+    /// This can reduce syscalls when the OS supports scatter/gather I/O.
+    /// </summary>
+    private async Task<(long sent, long received)> ForwardResponseWithGatherAsync(Socket server, Socket client, CancellationToken token)
+    {
+        const int BufferCount = 4;
+        const int BufferSize = 16384; // 16KB each, 64KB total
+
+        var buffers = new List<Memory<byte>>();
+        long totalSent = 0;
+        long totalReceived = 0;
+
+        try
+        {
+            while (true)
+            {
+                var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+                int received = await server.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
+
+                if (received == 0)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    break;
+                }
+
+                totalReceived += received;
+                buffers.Add(buffer.AsMemory(0, received));
+
+                // When we have enough buffers, flush them
+                if (buffers.Count >= BufferCount)
+                {
+                    foreach (var buf in buffers)
+                    {
+                        await client.SendAsync(buf, SocketFlags.None, token).ConfigureAwait(false);
+                        totalSent += buf.Length;
+                    }
+                    buffers.Clear();
+                }
+            }
+
+            // Flush remaining
+            foreach (var buf in buffers)
+            {
+                await client.SendAsync(buf, SocketFlags.None, token).ConfigureAwait(false);
+                totalSent += buf.Length;
+            }
+        }
+        finally
+        {
+            // Return all rented buffers
+            foreach (var buf in buffers)
+            {
+                if (MemoryMarshal.TryGetArray<byte>(buf, out var segment) && segment.Array != null)
+                {
+                    ArrayPool<byte>.Shared.Return(segment.Array);
+                }
+            }
         }
 
         return (totalSent, totalReceived);
