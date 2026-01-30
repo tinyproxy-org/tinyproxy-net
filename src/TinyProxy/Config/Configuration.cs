@@ -85,6 +85,12 @@ public sealed record Configuration
     public bool AddViaHeader { get; init; } = true;
 
     /// <summary>
+    /// Gets the custom proxy name for Via header.
+    /// If null, uses system hostname (aligns with tinyproxy C).
+    /// </summary>
+    public string? ViaProxyName { get; init; }
+
+    /// <summary>
     /// Gets whether to add X-Tinyproxy header.
     /// </summary>
     public bool AddXTinyproxyHeader { get; init; } = false;

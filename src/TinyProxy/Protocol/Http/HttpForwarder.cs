@@ -21,7 +21,6 @@ public sealed class HttpForwarder
     private readonly Stats _stats;
     private readonly AccessLogger _accessLogger;
     private readonly string _clientIp;
-    private const int BufferSize = 8192;
 
     public HttpForwarder(
         ILogger logger,
@@ -403,5 +402,32 @@ public sealed class HttpForwarder
         // Omit port for standard ports (80 for http, 443 for https) - matches tinyproxy C behavior
         var portSuffix = (port == 80) ? "" : $":{port}";
         return $"http://{host}{portSuffix}{uri}";
+    }
+
+    /// <summary>
+    /// Forwards response data from server to client, supporting chunked encoding.
+    /// Checks for Transfer-Encoding header to determine encoding type.
+    /// </summary>
+    private async Task<(long sent, long received)> ForwardResponseWithHeadersAsync(
+        Socket server,
+        Socket client,
+        IDictionary<string, ReadOnlySequence<byte>> responseHeaders,
+        CancellationToken token)
+    {
+        var isChunked = responseHeaders.ContainsKey("Transfer-Encoding") &&
+                        Encoding.ASCII.GetString(responseHeaders["Transfer-Encoding"].ToArray()).Contains("chunked", StringComparison.OrdinalIgnoreCase);
+
+        if (isChunked)
+        {
+            _logger.LogInfo("Using chunked transfer encoding for response");
+            var chunkedHandler = new ChunkedTransferHandler(_logger);
+            var bytes = await chunkedHandler.ForwardChunkedAsync(server, client, token).ConfigureAwait(false);
+            return (bytes, bytes);
+        }
+        else
+        {
+            // Use standard forwarding for non-chunked responses
+            return await ForwardResponseAsync(server, client, token).ConfigureAwait(false);
+        }
     }
 }
