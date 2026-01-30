@@ -45,27 +45,48 @@ public sealed record Configuration
     public long MaxRequestSize { get; init; } = 10 * 1024 * 1024; // 10 MB default
 
     /// <summary>
-    /// Gets the set of allowed IP addresses.
+    /// Gets the set of allowed IP addresses/patterns.
+    /// Supports: IP, CIDR (e.g., 192.168.1.0/24), wildcard (e.g., 192.168.*.*), domain suffix (.example.com).
+    /// Aligns with tinyproxy C's ACL functionality.
     /// </summary>
     public HashSet<string> AllowIPs { get; init; } = new();
 
     /// <summary>
-    /// Gets the set of denied IP addresses.
+    /// Gets the set of denied IP addresses/patterns.
+    /// Supports: IP, CIDR, wildcard, domain suffix.
+    /// Aligns with tinyproxy C's ACL functionality.
     /// </summary>
     public HashSet<string> DenyIPs { get; init; } = new();
 
     /// <summary>
-    /// Gets the filter regexes for URL filtering.
+    /// Gets the filter patterns for URL filtering.
+    /// Supports both regex and glob patterns (*, ?).
+    /// Aligns with tinyproxy C's filter.c.
     /// </summary>
-    public List<Regex> FilterRegexes { get; init; } = new();
+    public List<string> FilterPatterns { get; init; } = new();
+
+    /// <summary>
+    /// Gets whether filter patterns are case-sensitive.
+    /// Aligns with tinyproxy C's FILTER_OPT_CASESENSITIVE.
+    /// </summary>
+    public bool FilterCaseSensitive { get; init; } = false;
+
+    /// <summary>
+    /// Gets whether to use glob pattern matching instead of regex.
+    /// Aligns with tinyproxy C's FILTER_OPT_TYPE_FNMATCH.
+    /// </summary>
+    public bool FilterUseGlob { get; init; } = false;
 
     /// <summary>
     /// Gets the allowed CONNECT ports.
+    /// If empty, all ports are allowed.
+    /// Aligns with tinyproxy C's connect-ports.c.
     /// </summary>
     public HashSet<ushort> AllowedConnectPorts { get; init; } = new() { 443 };
 
     /// <summary>
     /// Gets the upstream proxy configuration.
+    /// Aligns with tinyproxy C's upstream.c.
     /// </summary>
     public UpstreamProxyConfig? UpstreamProxy { get; init; }
 
@@ -75,12 +96,20 @@ public sealed record Configuration
     public string? LogFile { get; init; }
 
     /// <summary>
-    /// Gets the basic authentication configuration.
+    /// Gets the basic authentication configuration (single user).
+    /// For multiple users, use BasicAuthUsers instead.
     /// </summary>
     public BasicAuthConfig? BasicAuth { get; init; }
 
     /// <summary>
+    /// Gets the list of basic authentication users.
+    /// Supports multiple user credentials.
+    /// </summary>
+    public List<BasicAuthUser> BasicAuthUsers { get; init; } = new();
+
+    /// <summary>
     /// Gets whether to add Via header.
+    /// Aligns with tinyproxy C's Via header handling in reqs.c.
     /// </summary>
     public bool AddViaHeader { get; init; } = true;
 
@@ -97,6 +126,7 @@ public sealed record Configuration
 
     /// <summary>
     /// Gets whether to filter URLs by default (deny all unless allowed).
+    /// Aligns with tinyproxy C's FILTER_OPT_DEFAULT_DENY.
     /// </summary>
     public bool FilterDefaultDeny { get; init; } = false;
 
@@ -108,7 +138,7 @@ public sealed record Configuration
     /// <summary>
     /// Gets the allowed headers for anonymous mode.
     /// When non-empty, only these headers are allowed to pass through to the server.
-    /// Aligns with tinyproxy C's anonymous_map.
+    /// Aligns with tinyproxy C's anonymous.c.
     /// </summary>
     public HashSet<string> AnonymousAllowedHeaders { get; init; } = new();
 
@@ -263,11 +293,21 @@ public enum UpstreamProxyType
 }
 
 /// <summary>
-/// Basic authentication configuration.
+/// Basic authentication configuration (single user).
 /// </summary>
 public sealed record BasicAuthConfig
 {
     public required string Username { get; init; }
     public required string Password { get; init; }
     public string? Realm { get; init; } = "TinyProxy";
+}
+
+/// <summary>
+/// Basic authentication user configuration.
+/// Supports multiple users.
+/// </summary>
+public sealed record BasicAuthUser
+{
+    public required string Username { get; init; }
+    public required string Password { get; init; }
 }
