@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Collections.Concurrent;
+using System.Linq;
 using TinyProxy.Config;
 
 namespace TinyProxy.Filter;
@@ -16,6 +17,7 @@ public sealed class AccessControl
     private readonly List<AccessRule> _denyRules;
     private readonly ConcurrentDictionary<string, string> _dnsCache;
     private readonly ConcurrentDictionary<string, IPAddress> _dnsForwardCache;
+    private const int MaxCacheSize = 1000;
 
     public AccessControl(Configuration config)
     {
@@ -78,7 +80,7 @@ public sealed class AccessControl
         // Try to resolve hostname to IP and check
         try
         {
-            var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken);
+            var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken).ConfigureAwait(false);
             foreach (var address in addresses)
             {
                 if (!IsAllowed(address.ToString()))
@@ -88,7 +90,12 @@ public sealed class AccessControl
             }
             return true;
         }
-        catch
+        catch (HttpRequestException)
+        {
+            // DNS resolution failed, deny
+            return false;
+        }
+        catch (SocketException)
         {
             // DNS resolution failed, deny
             return false;
@@ -317,10 +324,11 @@ public sealed class AccessControl
     /// Performs reverse DNS lookup with caching.
     /// Aligns with tinyproxy C's getnameinfo call in acl_string_processing.
     /// </summary>
+
     private async Task<string> GetHostnameAsync(IPEndPoint endPoint, CancellationToken cancellationToken)
     {
         var cacheKey = endPoint.Address.ToString();
-        
+
         if (_dnsCache.TryGetValue(cacheKey, out var cachedHostname))
         {
             return cachedHostname;
@@ -328,14 +336,24 @@ public sealed class AccessControl
 
         try
         {
-            var hostEntry = await Dns.GetHostEntryAsync(endPoint.Address.ToString(), cancellationToken);
+            var hostEntry = await Dns.GetHostEntryAsync(endPoint.Address.ToString(), cancellationToken).ConfigureAwait(false);
             var hostname = hostEntry.HostName;
-            
-            // Cache the result
+
+            // Cache with LRU eviction
+            if (_dnsCache.Count >= MaxCacheSize)
+            {
+                // Remove some entries to keep cache size under control
+                var keysToRemove = _dnsCache.Keys.Take(100).ToList();
+                foreach (var key in keysToRemove)
+                {
+                    _dnsCache.TryRemove(key, out _);
+                }
+            }
+
             _dnsCache.TryAdd(cacheKey, hostname);
             return hostname;
         }
-        catch
+        catch (SocketException)
         {
             // Reverse DNS failed
             return string.Empty;

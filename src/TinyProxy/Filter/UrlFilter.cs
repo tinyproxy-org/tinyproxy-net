@@ -1,31 +1,36 @@
 using System.Text.RegularExpressions;
 using TinyProxy.Config;
+using TinyProxy.Core;
+using TinyProxy.Logging;
 
 namespace TinyProxy.Filter;
 
 /// <summary>
-/// URL filtering using regex or glob patterns.
+/// URL filtering using regex or glob patterns with ReDoS protection.
 /// Aligns with tinyproxy C's filter.c implementation.
 /// </summary>
 public sealed class UrlFilter
 {
     private readonly Configuration _config;
+    private readonly ILogger _logger;
     private readonly List<FilterRule> _regexRules;
     private readonly List<FilterRule> _globRules;
+    private const int RegexTimeoutMs = 5000; // 5 second timeout for regex matching
 
-    public UrlFilter(Configuration config)
+    public UrlFilter(Configuration config, ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
-        
+        _logger = logger ?? new Core.ConsoleLogger();
+
         // Parse filter regexes into rules
         _regexRules = new List<FilterRule>();
         _globRules = new List<FilterRule>();
-        
+
         foreach (var pattern in config.FilterPatterns)
         {
             if (string.IsNullOrWhiteSpace(pattern))
                 continue;
-            
+
             // Check if it's a glob pattern (contains * or ?)
             if (pattern.Contains('*') || pattern.Contains('?'))
             {
@@ -33,20 +38,25 @@ public sealed class UrlFilter
             }
             else
             {
-                // Compile as regex
+                // Compile as regex with timeout protection
                 try
                 {
-                    var options = config.FilterCaseSensitive 
-                        ? RegexOptions.None 
+                    var options = config.FilterCaseSensitive
+                        ? RegexOptions.None
                         : RegexOptions.IgnoreCase;
-                    
-                    var regex = new Regex(pattern, options | RegexOptions.Compiled);
+
+                    var regex = new Regex(pattern, options | RegexOptions.Compiled, TimeSpan.FromMilliseconds(RegexTimeoutMs));
                     _regexRules.Add(new FilterRule(pattern, FilterType.Regex, regex));
                 }
                 catch (ArgumentException ex)
                 {
                     // Invalid regex, log but don't crash
-                    System.Console.WriteLine($"Invalid filter pattern: {pattern}, error: {ex.Message}");
+                    _logger.LogWarning($"Invalid filter pattern: {pattern}, error: {ex.Message}");
+                }
+                catch (RegexMatchTimeoutException ex)
+                {
+                    // Regex too complex, skip this pattern
+                    _logger.LogWarning($"Filter pattern too complex (ReDoS risk): {pattern}, error: {ex.Message}");
                 }
             }
         }
@@ -66,7 +76,7 @@ public sealed class UrlFilter
 
         var matched = false;
 
-        // Check regex rules
+        // Check regex rules with timeout protection
         foreach (var rule in _regexRules)
         {
             if (rule.Regex?.IsMatch(url) == true)
@@ -122,7 +132,7 @@ public sealed class UrlFilter
         {
             return false;
         }
-        
+
         // If default deny and path is allowed, return true
         if (_config.FilterDefaultDeny && pathAllowed)
         {
@@ -155,7 +165,7 @@ public sealed class UrlFilter
             if (patternIndex < pattern.Length)
             {
                 var patternChar = pattern[patternIndex];
-                
+
                 if (patternChar == '?')
                 {
                     // ? matches any single character

@@ -81,7 +81,7 @@ public sealed class HttpResponseProcessor
                 // Parse status code
                 var statusLine = Encoding.ASCII.GetString(buffer, 0, position);
                 var parts = statusLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                
+
                 if (parts.Length >= 2 && int.TryParse(parts[1], out var code))
                 {
                     return (position + 1, code);

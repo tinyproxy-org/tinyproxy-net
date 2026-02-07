@@ -15,11 +15,6 @@ namespace TinyProxy.Core;
 /// </summary>
 public sealed class Connection : IDisposable
 {
-    // Shared pools to reduce per-connection allocations
-    private static readonly ObjectPool<AccessControl> _accessControlPool = new(128, () => new AccessControl(Configuration.Default));
-    private static readonly ObjectPool<BasicAuth> _basicAuthPool = new(128, () => new BasicAuth(Configuration.Default));
-    private static readonly ObjectPool<UrlFilter> _urlFilterPool = new(128, () => new UrlFilter(Configuration.Default));
-
     private readonly Socket _clientSocket;
     private readonly ILogger _logger;
     private readonly Configuration _config;
@@ -27,6 +22,9 @@ public sealed class Connection : IDisposable
     private readonly AccessLogger _accessLogger;
     private readonly CancellationTokenSource _cts = new();
     private readonly string _clientIp;
+    private readonly AccessControl _accessControl;
+    private readonly BasicAuth _basicAuth;
+    private readonly UrlFilter _urlFilter;
     private bool _disposed;
 
     public Socket ClientSocket => _clientSocket;
@@ -47,6 +45,11 @@ public sealed class Connection : IDisposable
         _accessLogger = accessLogger ?? throw new ArgumentNullException(nameof(accessLogger));
 
         _clientIp = ExtractClientIp();
+
+        // Create filter instances with current configuration
+        _accessControl = new AccessControl(_config);
+        _basicAuth = new BasicAuth(_config);
+        _urlFilter = new UrlFilter(_config, _logger);
     }
 
     private string ExtractClientIp()
@@ -77,59 +80,47 @@ public sealed class Connection : IDisposable
 
             _stats.IncrementRequests();
 
-            // Rent filter instances from pool (reduces allocations)
-            var accessControl = _accessControlPool.Rent();
-            var basicAuth = _basicAuthPool.Rent();
-            var urlFilter = _urlFilterPool.Rent();
-
-            try
+            // Check access control (IP whitelist/blacklist)
+            if (!_accessControl.IsAllowed(_clientSocket.RemoteEndPoint!))
             {
-                // Check access control (IP whitelist/blacklist)
-                if (!accessControl.IsAllowed(_clientSocket.RemoteEndPoint!))
-                {
-                    _logger.LogWarning($"Access denied for {_clientSocket.RemoteEndPoint}");
-                    _stats.IncrementFailedRequests();
-                    await Protocol.HtmlErrorPages.ForbiddenAsync(
-                        _clientSocket,
-                        "Access denied by IP filter",
-                        token);
-                    LogAccess(firstRequest, 403, 0);
-                    return;
-                }
-
-                // Check authentication
-                var authHeader = BasicAuth.GetAuthorizationHeader(firstRequest.Headers);
-                if (!basicAuth.Validate(authHeader))
-                {
-                    _logger.LogWarning($"Authentication failed for {_clientSocket.RemoteEndPoint}");
-                    _stats.IncrementFailedRequests();
-                    await Protocol.HtmlErrorPages.ProxyAuthenticationRequiredAsync(
-                        _clientSocket,
-                        basicAuth.GetRealm(),
-                        token);
-                    LogAccess(firstRequest, 407, 0);
-                    return;
-                }
-
-                // Check URL filter
-                if (!urlFilter.IsRequestAllowed(firstRequest))
-                {
-                    _logger.LogWarning($"URL filtered: {firstRequest.Uri}");
-                    _stats.IncrementFailedRequests();
-                    await Protocol.HtmlErrorPages.ForbiddenAsync(
-                        _clientSocket,
-                        "URL filtered by proxy policy",
-                        token);
-                    LogAccess(firstRequest, 403, 0);
-                    return;
-                }
+                _logger.LogWarning($"Access denied for {_clientSocket.RemoteEndPoint}");
+                _stats.IncrementFailedRequests();
+                _stats.IncrementDeniedRequests();
+                await Protocol.HtmlErrorPages.ForbiddenAsync(
+                    _clientSocket,
+                    "Access denied by IP filter",
+                    token);
+                LogAccess(firstRequest, 403, 0);
+                return;
             }
-            finally
+
+            // Check authentication
+            var authHeader = BasicAuth.GetAuthorizationHeader(firstRequest.Headers);
+            if (!_basicAuth.Validate(authHeader))
             {
-                // Return filters to pool for reuse
-                _accessControlPool.Return(accessControl);
-                _basicAuthPool.Return(basicAuth);
-                _urlFilterPool.Return(urlFilter);
+                _logger.LogWarning($"Authentication failed for {_clientSocket.RemoteEndPoint}");
+                _stats.IncrementFailedRequests();
+                _stats.IncrementDeniedRequests();
+                await Protocol.HtmlErrorPages.ProxyAuthenticationRequiredAsync(
+                    _clientSocket,
+                    _basicAuth.GetRealm(),
+                    token);
+                LogAccess(firstRequest, 407, 0);
+                return;
+            }
+
+            // Check URL filter
+            if (!_urlFilter.IsRequestAllowed(firstRequest))
+            {
+                _logger.LogWarning($"URL filtered: {firstRequest.Uri}");
+                _stats.IncrementFailedRequests();
+                _stats.IncrementDeniedRequests();
+                await Protocol.HtmlErrorPages.ForbiddenAsync(
+                    _clientSocket,
+                    "URL filtered by proxy policy",
+                    token);
+                LogAccess(firstRequest, 403, 0);
+                return;
             }
 
             if (_config.Verbose)
@@ -158,6 +149,7 @@ public sealed class Connection : IDisposable
                 if (dest == null)
                 {
                     _stats.IncrementFailedRequests();
+                    _stats.IncrementDeniedRequests();
                     await Protocol.HtmlErrorPages.BadRequestAsync(
                         _clientSocket,
                         "Unable to determine destination in transparent proxy mode",
@@ -348,8 +340,11 @@ public sealed class Connection : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        // Close socket first to unblock pending operations
+        _clientSocket.Dispose();
+
+        // Then cancel and dispose token
         _cts.Cancel();
         _cts.Dispose();
-        _clientSocket.Dispose();
     }
 }

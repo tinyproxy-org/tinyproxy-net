@@ -46,7 +46,7 @@ public sealed class PipelineForwarder
         {
             // Start reading from source and writing to pipe
             var sourceToPipe = CopySourceToPipeAsync(source, writer, token);
-            
+
             // Start reading from pipe and writing to destination
             var pipeToDestination = CopyPipeToDestinationAsync(reader, destination, token);
 

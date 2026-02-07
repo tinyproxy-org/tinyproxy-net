@@ -9,29 +9,31 @@ namespace TinyProxy.Security;
 /// HTTP Basic Authentication validator.
 /// Aligns with tinyproxy C's basicauth.c implementation.
 /// Supports multiple users with constant-time comparison for security.
+/// Stores passwords as byte arrays for consistent encoding.
 /// </summary>
 public sealed class BasicAuth
 {
     private readonly Configuration _config;
-    private readonly Dictionary<string, string> _credentials;
+    private readonly Dictionary<string, byte[]> _credentials;
 
     public BasicAuth(Configuration config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
-        _credentials = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        
+        _credentials = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+
         // Initialize credentials from config
         if (_config.BasicAuth != null)
         {
-            _credentials[_config.BasicAuth.Username] = _config.BasicAuth.Password;
+            _credentials[_config.BasicAuth.Username] =
+                Encoding.UTF8.GetBytes(_config.BasicAuth.Password);
         }
-        
+
         // Add any additional credentials
         if (_config.BasicAuthUsers != null)
         {
             foreach (var user in _config.BasicAuthUsers)
             {
-                _credentials[user.Username] = user.Password;
+                _credentials[user.Username] = Encoding.UTF8.GetBytes(user.Password);
             }
         }
     }
@@ -91,7 +93,18 @@ public sealed class BasicAuth
         }
 
         // Use constant-time comparison to prevent timing attacks
-        return ConstantTimeEquals(password, storedPassword);
+        // Use stackalloc to avoid heap allocation for password comparison
+        var passwordBytes = Encoding.UTF8.GetBytes(password);
+
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(passwordBytes, storedPassword);
+        }
+        finally
+        {
+            // Clear sensitive data from heap
+            CryptographicOperations.ZeroMemory(passwordBytes);
+        }
     }
 
     /// <summary>
@@ -111,7 +124,17 @@ public sealed class BasicAuth
             return false;
         }
 
-        return ConstantTimeEquals(password, storedPassword);
+        var passwordBytes = Encoding.UTF8.GetBytes(password);
+
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(passwordBytes, storedPassword);
+        }
+        finally
+        {
+            // Clear sensitive data from heap
+            CryptographicOperations.ZeroMemory(passwordBytes);
+        }
     }
 
     /// <summary>
@@ -120,27 +143,11 @@ public sealed class BasicAuth
     /// </summary>
     public void AddUser(string username, string password)
     {
-        _credentials[username] = password;
+        _credentials[username] = Encoding.UTF8.GetBytes(password);
     }
 
     /// <summary>
-    /// Constant-time string comparison to prevent timing attacks.
-    /// </summary>
-    private static bool ConstantTimeEquals(string a, string b)
-    {
-        if (a.Length != b.Length)
-        {
-            return false;
-        }
-
-        var aBytes = Encoding.UTF8.GetBytes(a);
-        var bBytes = Encoding.UTF8.GetBytes(b);
-
-        return CryptographicOperations.FixedTimeEquals(aBytes, bBytes);
-    }
-
-    /// <summary>
-    /// Extracts the Authorization header from the request headers.
+    /// Extracts Authorization header from the request headers.
     /// </summary>
     public static string? GetAuthorizationHeader(IDictionary<string, ReadOnlySequence<byte>> headers)
     {

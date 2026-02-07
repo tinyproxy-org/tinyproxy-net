@@ -67,11 +67,11 @@ public sealed class HttpForwarder
             _logger.LogInfo($"Forwarding {HttpMethodParser.ToHttpString(request.Method)} {request.Uri}");
         }
 
+        Socket serverSocket = null!;
+        long bytesReceived = 0;
+
         try
         {
-            Socket serverSocket;
-            long bytesReceived = 0;
-
             // Check if upstream proxy is configured
             if (_config.UpstreamProxy != null)
             {
@@ -100,28 +100,25 @@ public sealed class HttpForwarder
             }
 
         Connected:
-            try
+            // Build modified request
+            var requestBuffer = BuildForwardRequest(request, host, port);
+            await serverSocket.SendAsync(requestBuffer, SocketFlags.None, token).ConfigureAwait(false);
+
+            // Send any body data
+            if (request.Body.Length > 0 && request.ContentLength.HasValue && request.ContentLength.Value > 0)
             {
-                // Build modified request
-                var requestBuffer = BuildForwardRequest(request, host, port);
-                await serverSocket.SendAsync(requestBuffer, SocketFlags.None, token).ConfigureAwait(false);
-
-                // Send any body data
-                if (request.Body.Length > 0 && request.ContentLength.HasValue && request.ContentLength.Value > 0)
-                {
-                    await SendBodyAsync(serverSocket, request.Body, token).ConfigureAwait(false);
-                }
-
-                // Read response from server and forward to client
-                (bytesSent, bytesReceived) = await ForwardResponseAsync(serverSocket, connection.ClientSocket, token).ConfigureAwait(false);
-
-                _stats.AddBytesSent(bytesSent);
-                _stats.AddBytesReceived(bytesReceived);
+                await SendBodyAsync(serverSocket, request.Body, token).ConfigureAwait(false);
             }
-            finally
-            {
-                serverSocket.Dispose();
-            }
+
+            // Read response from server and forward to client
+            (bytesSent, bytesReceived) = await ForwardResponseAsync(serverSocket, connection.ClientSocket, token).ConfigureAwait(false);
+
+            _stats.AddBytesSent(bytesSent);
+            _stats.AddBytesReceived(bytesReceived);
+
+            // Close server socket after response is complete
+            // This ensures we don't wait for keep-alive connections
+            serverSocket.Shutdown(SocketShutdown.Both);
         }
         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
         {
@@ -135,6 +132,18 @@ public sealed class HttpForwarder
             statusCode = 504;
             await SendErrorAsync(connection.ClientSocket, 504, "Gateway Timeout", "Server response timeout");
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Server shutdown - don't send error response
+            _stats.IncrementFailedRequests();
+            statusCode = 504;
+        }
+        catch (OperationCanceledException)
+        {
+            // Request timeout - treat as Gateway Timeout
+            _stats.IncrementFailedRequests();
+            statusCode = 504;
+        }
         catch (Exception ex)
         {
             _logger.LogError($"Forward error: {ex.Message}");
@@ -144,6 +153,16 @@ public sealed class HttpForwarder
         }
         finally
         {
+            // Always dispose server socket
+            try
+            {
+                serverSocket?.Dispose();
+            }
+            catch (SocketException)
+            {
+                // Socket already closed or invalid
+            }
+
             LogAccess(connection, request, statusCode, bytesSent);
         }
     }
