@@ -1,9 +1,4 @@
-using System;
-using System.Buffers;
 using System.Buffers.Text;
-using System.Collections.Generic;
-using System.Text;
-using TinyProxy.Core;
 
 namespace TinyProxy.Protocol.Http;
 

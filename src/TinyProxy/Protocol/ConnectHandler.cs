@@ -1,17 +1,4 @@
-using System;
-using System.Buffers;
 using System.Buffers.Text;
-using System.Collections.Generic;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using TinyProxy.Config;
-using TinyProxy.Core;
-using TinyProxy.Filter;
-using TinyProxy.Logging;
-using TinyProxy.Metrics;
 
 namespace TinyProxy.Protocol;
 

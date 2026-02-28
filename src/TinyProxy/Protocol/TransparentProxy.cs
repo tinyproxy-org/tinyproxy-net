@@ -1,12 +1,3 @@
-using System;
-using System.Buffers;
-using System.Collections.Generic;
-using System.Net;
-using System.Net.Sockets;
-using TinyProxy.Config;
-using TinyProxy.Core;
-using TinyProxy.Protocol.Http;
-
 namespace TinyProxy.Protocol;
 
 /// <summary>

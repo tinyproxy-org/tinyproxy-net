@@ -1,12 +1,5 @@
-using System;
-using System.Net;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading;
-using System.Threading.Tasks;
-using TinyProxy.Config;
-using TinyProxy.Core;
 
 namespace TinyProxy.Metrics;
 

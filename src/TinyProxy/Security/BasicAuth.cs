@@ -1,9 +1,4 @@
-using System;
-using System.Buffers;
-using System.Collections.Generic;
 using System.Security.Cryptography;
-using System.Text;
-using TinyProxy.Config;
 
 namespace TinyProxy.Security;
 

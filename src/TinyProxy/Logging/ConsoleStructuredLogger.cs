@@ -1,6 +1,3 @@
-using System;
-using TinyProxy.Core;
-
 namespace TinyProxy.Logging;
 
 /// <summary>

@@ -1,8 +1,3 @@
-using System;
-using System.IO;
-using TinyProxy.Config;
-using TinyProxy.Core;
-
 namespace TinyProxy.Logging;
 
 /// <summary>

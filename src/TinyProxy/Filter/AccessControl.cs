@@ -1,14 +1,4 @@
-using System;
-using System.Net;
-using System.Net.Sockets;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
-using TinyProxy.Config;
-using TinyProxy.Core;
 
 namespace TinyProxy.Filter;
 

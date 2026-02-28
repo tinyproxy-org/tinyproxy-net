@@ -1,6 +1,3 @@
-using System.Text;
-using System.Threading;
-
 namespace TinyProxy.Core;
 
 /// <summary>

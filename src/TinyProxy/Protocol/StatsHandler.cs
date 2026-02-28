@@ -1,12 +1,3 @@
-using System;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using TinyProxy.Config;
-using TinyProxy.Core;
-using TinyProxy.Metrics;
-
 namespace TinyProxy.Protocol;
 
 /// <summary>

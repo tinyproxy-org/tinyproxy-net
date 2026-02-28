@@ -1,13 +1,3 @@
-using System;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Threading.Tasks;
-using TinyProxy.Config;
-using TinyProxy.Core;
-using TinyProxy.Logging;
-using TinyProxy.Metrics;
-
 namespace TinyProxy;
 
 internal class Program

@@ -1,8 +1,4 @@
-using System;
-using System.Collections.Generic;
 using System.Text.RegularExpressions;
-using TinyProxy.Config;
-using TinyProxy.Core;
 
 namespace TinyProxy.Filter;
 
