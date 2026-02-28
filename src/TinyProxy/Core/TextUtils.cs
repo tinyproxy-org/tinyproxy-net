@@ -186,15 +186,14 @@ public static class TextUtils
             var colonIndex = input.LastIndexOf(':');
             if (colonIndex > 0)
             {
+                // Aligns with tinyproxy C's strip_return_port():
+                // split host at the last colon first, then parse port if valid.
+                host = input.Substring(0, colonIndex);
+
                 var portStr = input.Substring(colonIndex + 1);
                 if (int.TryParse(portStr, out var parsedPort) && parsedPort > 0 && parsedPort <= 65535)
                 {
                     port = parsedPort;
-                    host = input.Substring(0, colonIndex);
-                }
-                else
-                {
-                    host = input;
                 }
             }
             else

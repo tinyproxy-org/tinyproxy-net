@@ -1372,8 +1372,7 @@ public sealed class HttpForwarder
 
         if (TryGetAbsoluteUriScheme(request.Uri, out var scheme))
         {
-            if (scheme.Equals("http".AsSpan(), StringComparison.OrdinalIgnoreCase) ||
-                scheme.Equals("https".AsSpan(), StringComparison.OrdinalIgnoreCase))
+            if (scheme.Equals("http".AsSpan(), StringComparison.OrdinalIgnoreCase))
                 return request.TryGetTarget(out host, out port);
 
             if (!scheme.Equals("ftp".AsSpan(), StringComparison.OrdinalIgnoreCase))

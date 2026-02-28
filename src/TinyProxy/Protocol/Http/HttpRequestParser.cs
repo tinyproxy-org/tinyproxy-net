@@ -49,6 +49,9 @@ public sealed class HttpRequestParser
         if (!TryParseRequestLine(requestLineBytes, out var methodSpan, out var uriSpan, out var versionSpan))
             return false;
 
+        if (!versionSpan.SequenceEqual("HTTP/0.9"u8) && !IsValidHttpVersionToken(versionSpan))
+            return false;
+
         var rawMethod = GetAsciiString(methodSpan);
         var method = HttpMethodParser.Parse(methodSpan);
         if (method == HttpMethod.None) _logger.LogWarning($"Unknown HTTP method: {rawMethod}");
@@ -189,23 +192,80 @@ public sealed class HttpRequestParser
         var firstSpace = requestLine.IndexOf((byte)' ');
         if (firstSpace <= 0) return false;
 
-        var secondSpaceRelative = requestLine[(firstSpace + 1)..].IndexOf((byte)' ');
+        method = requestLine[..firstSpace];
+
+        var cursor = SkipSpaces(requestLine, firstSpace + 1);
+        if (cursor >= requestLine.Length) return false;
+
+        var secondSpaceRelative = requestLine[cursor..].IndexOf((byte)' ');
         if (secondSpaceRelative < 0)
         {
-            method = requestLine[..firstSpace];
-            uri = requestLine[(firstSpace + 1)..];
+            uri = requestLine[cursor..];
             version = "HTTP/0.9"u8;
             return !uri.IsEmpty;
         }
 
-        if (secondSpaceRelative == 0) return false;
+        var uriEnd = cursor + secondSpaceRelative;
+        uri = requestLine[cursor..uriEnd];
+        if (uri.IsEmpty) return false;
 
-        var secondSpace = firstSpace + 1 + secondSpaceRelative;
+        cursor = SkipSpaces(requestLine, uriEnd + 1);
+        if (cursor >= requestLine.Length)
+        {
+            version = "HTTP/0.9"u8;
+            return true;
+        }
 
-        method = requestLine[..firstSpace];
-        uri = requestLine[(firstSpace + 1)..secondSpace];
-        version = requestLine[(secondSpace + 1)..];
+        var versionSpaceRelative = requestLine[cursor..].IndexOf((byte)' ');
+        version = versionSpaceRelative < 0
+            ? requestLine[cursor..]
+            : requestLine[cursor..(cursor + versionSpaceRelative)];
+
         return !version.IsEmpty;
+    }
+
+    private static int SkipSpaces(ReadOnlySpan<byte> value, int start)
+    {
+        var index = start;
+        while (index < value.Length && value[index] == (byte)' ')
+            index++;
+        return index;
+    }
+
+    private static bool IsValidHttpVersionToken(ReadOnlySpan<byte> token)
+    {
+        // Matches tinyproxy C's sscanf("HTTP/%u.%u") behavior:
+        // requires HTTP/ + numeric major/minor, allows trailing characters.
+        if (token.Length < 8) return false;
+
+        if (!EqualsIgnoreCaseAscii(token[0], (byte)'H') ||
+            !EqualsIgnoreCaseAscii(token[1], (byte)'T') ||
+            !EqualsIgnoreCaseAscii(token[2], (byte)'T') ||
+            !EqualsIgnoreCaseAscii(token[3], (byte)'P') ||
+            token[4] != (byte)'/')
+            return false;
+
+        var index = 5;
+        var majorStart = index;
+        while (index < token.Length && token[index] is >= (byte)'0' and <= (byte)'9')
+            index++;
+        if (index == majorStart || index >= token.Length || token[index] != (byte)'.')
+            return false;
+
+        index++;
+        var minorStart = index;
+        while (index < token.Length && token[index] is >= (byte)'0' and <= (byte)'9')
+            index++;
+
+        return index > minorStart;
+    }
+
+    private static bool EqualsIgnoreCaseAscii(byte value, byte expectedUpper)
+    {
+        if (value is >= (byte)'a' and <= (byte)'z')
+            value = (byte)(value - 32);
+
+        return value == expectedUpper;
     }
 
     private static void ParseCommonHeader(

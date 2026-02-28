@@ -74,6 +74,21 @@ public sealed class Connection : IDisposable
                 return;
             }
 
+            // Check access control (IP whitelist/blacklist) before reading request.
+            // Aligns with tinyproxy C's handle_connection() ordering.
+            var remoteEndPoint = _clientSocket.RemoteEndPoint;
+            if (remoteEndPoint != null && !_accessControl.IsAllowed(remoteEndPoint))
+            {
+                _logger.LogWarning($"Access denied for {remoteEndPoint}");
+                _stats.IncrementFailedRequests();
+                _stats.IncrementDeniedRequests();
+                await Protocol.HtmlErrorPages.ForbiddenAsync(
+                    _clientSocket,
+                    "Access denied by IP filter",
+                    token);
+                return;
+            }
+
             // Read first request to determine if it's CONNECT.
             var (firstRequest, isBadRequest) = await ReadFirstRequestAsync(token).ConfigureAwait(false);
             if (firstRequest == null)
@@ -92,20 +107,6 @@ public sealed class Connection : IDisposable
 
             _stats.IncrementRequests();
             var isStatPageRequest = IsStatPageRequest(firstRequest);
-
-            // Check access control (IP whitelist/blacklist)
-            if (!_accessControl.IsAllowed(_clientSocket.RemoteEndPoint!))
-            {
-                _logger.LogWarning($"Access denied for {_clientSocket.RemoteEndPoint}");
-                _stats.IncrementFailedRequests();
-                _stats.IncrementDeniedRequests();
-                await Protocol.HtmlErrorPages.ForbiddenAsync(
-                    _clientSocket,
-                    "Access denied by IP filter",
-                    token);
-                LogAccess(firstRequest, 403, 0);
-                return;
-            }
 
             // Check authentication
             var authHeader = GetAuthHeader(firstRequest, isStatPageRequest, out var statHostAuthFlow);

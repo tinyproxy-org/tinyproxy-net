@@ -677,17 +677,31 @@ public sealed class ConnectHandler
         ReadOnlySequence<byte> initialServerData,
         CancellationToken token)
     {
-        // Use timeout to prevent hanging connections and resource exhaustion
+        // Use idle timeout (not absolute timeout) to align with tinyproxy C relay behavior.
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
-        cts.CancelAfter(_config.ConnectIdleTimeout);
+        var idleTimeout = _config.ConnectIdleTimeout;
+        var idleTimeoutSync = idleTimeout > TimeSpan.Zero ? new object() : null;
+
+        void TouchIdleTimeout()
+        {
+            if (idleTimeout <= TimeSpan.Zero || idleTimeoutSync == null) return;
+
+            lock (idleTimeoutSync)
+            {
+                if (!cts.IsCancellationRequested)
+                    cts.CancelAfter(idleTimeout);
+            }
+        }
+
+        TouchIdleTimeout();
 
         // Run both directions concurrently
-        var clientToServer = CopyDataAsync(client, server, "Client->Server", initialClientData, cts.Token);
-        var serverToClient = CopyDataAsync(server, client, "Server->Client", initialServerData, cts.Token);
+        var clientToServer = CopyDataAsync(client, server, "Client->Server", initialClientData, cts.Token, TouchIdleTimeout);
+        var serverToClient = CopyDataAsync(server, client, "Server->Client", initialServerData, cts.Token, TouchIdleTimeout);
 
-        // Tunnel closes when either direction completes.
-        await Task.WhenAny(clientToServer, serverToClient).ConfigureAwait(false);
-        cts.Cancel();
+        // Keep forwarding until both directions complete (or timeout/cancellation).
+        // This aligns with tinyproxy C relay behavior and avoids truncating half-close flows.
+        await Task.WhenAll(clientToServer, serverToClient).ConfigureAwait(false);
 
         var toServer = await clientToServer.ConfigureAwait(false);
         var toClient = await serverToClient.ConfigureAwait(false);
@@ -787,13 +801,15 @@ public sealed class ConnectHandler
         Socket destination,
         string direction,
         ReadOnlySequence<byte> initialData,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         // Use larger buffer for tunnel data transfer
         const int TunnelBufferSize = 65536;
 
         var buffer = ArrayPool<byte>.Shared.Rent(TunnelBufferSize);
         long totalBytes = 0;
+        var sourceClosed = false;
 
         try
         {
@@ -803,14 +819,22 @@ public sealed class ConnectHandler
                 {
                     totalBytes += segment.Length;
                     await destination.SendAllAsync(segment, token).ConfigureAwait(false);
+                    onActivity?.Invoke();
                 }
 
             // Then copy data continuously
-            int received;
-            while ((received = await source.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false)) > 0)
+            while (true)
             {
+                var received = await source.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
+                if (received == 0)
+                {
+                    sourceClosed = true;
+                    break;
+                }
+
                 totalBytes += received;
                 await destination.SendAllAsync(buffer.AsMemory(0, received), token).ConfigureAwait(false);
+                onActivity?.Invoke();
 
                 // Cooperative yield for fairness under high load
                 if (received > 32768) await Task.Yield();
@@ -823,6 +847,23 @@ public sealed class ConnectHandler
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        // Preserve half-close semantics so the opposite relay direction can complete promptly.
+        if (sourceClosed)
+        {
+            try
+            {
+                destination.Shutdown(SocketShutdown.Send);
+            }
+            catch (SocketException)
+            {
+                // Destination might already be closed.
+            }
+            catch (ObjectDisposedException)
+            {
+                // Destination already disposed.
+            }
         }
 
         return totalBytes;
