@@ -9,13 +9,22 @@ namespace TinyProxy.Protocol;
 /// </summary>
 public sealed class ReverseProxy
 {
-    private const string ReverseCookieName = "RPLPATH"; // Aligns with tinyproxy C's REVERSE_COOKIE
+    private const string ReverseCookieName = "yummy_magical_cookie"; // Aligns with tinyproxy C's REVERSE_COOKIE
 
     private readonly ILogger _logger;
     private readonly Configuration _config;
     private readonly Stats _stats;
     private readonly AccessLogger _accessLogger;
     private readonly string _clientIp;
+
+    public enum RewriteStatus
+    {
+        NotMatched,
+        ResponseSent,
+        Rewritten
+    }
+
+    public readonly record struct RewriteResult(RewriteStatus Status, HttpRequest Request);
 
     public ReverseProxy(
         ILogger logger,
@@ -41,8 +50,30 @@ public sealed class ReverseProxy
         HttpRequest request,
         CancellationToken token)
     {
+        var rewriteResult = await TryRewriteAsync(connection, request, token).ConfigureAwait(false);
+        if (rewriteResult.Status == RewriteStatus.NotMatched) return false;
+        if (rewriteResult.Status == RewriteStatus.ResponseSent) return true;
+
+        // Forward the rewritten request
+        var forwarder = new HttpForwarder(_logger, _config, _stats, _accessLogger, _clientIp);
+        await forwarder.ForwardAsync(connection, rewriteResult.Request, token).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Tries to rewrite reverse proxy requests without forwarding.
+    /// Allows callers to apply additional policies (for example URL filtering)
+    /// after rewrite and before outbound forwarding.
+    /// </summary>
+    public async ValueTask<RewriteResult> TryRewriteAsync(
+        Connection connection,
+        HttpRequest request,
+        CancellationToken token)
+    {
         // Reverse proxy requests must start with /
-        if (string.IsNullOrEmpty(request.Uri) || request.Uri[0] != '/') return false;
+        if (string.IsNullOrEmpty(request.Uri) || request.Uri[0] != '/')
+            return new RewriteResult(RewriteStatus.NotMatched, request);
 
         // Find matching reverse path
         var matchedPath = FindReversePath(request.Uri);
@@ -56,20 +87,21 @@ public sealed class ReverseProxy
                 matchedByCookie = matchedPath != null;
             }
 
-            if (matchedPath == null) return false;
+            if (matchedPath == null)
+                return new RewriteResult(RewriteStatus.NotMatched, request);
         }
 
         if (!matchedByCookie && request.Uri.Length == matchedPath.Path.Length - 1)
         {
             // Redirect to add trailing slash (aligns with tinyproxy C behavior)
-            await SendRedirectAsync(connection.ClientSocket, matchedPath.Path, token);
+            await SendRedirectAsync(connection.ClientSocket, matchedPath.Path, token).ConfigureAwait(false);
             _accessLogger.LogAccess(_clientIp,
                 request.GetMethodToken(),
                 request.Uri,
                 request.Version,
                 301,
                 0);
-            return true;
+            return new RewriteResult(RewriteStatus.ResponseSent, request);
         }
 
         // Rewrite the URL
@@ -84,11 +116,7 @@ public sealed class ReverseProxy
         if (_config.ReverseMagicEnabled)
             modifiedRequest = modifiedRequest.WithReverseMagicCookiePath(matchedPath.Path);
 
-        // Forward the rewritten request
-        var forwarder = new HttpForwarder(_logger, _config, _stats, _accessLogger, _clientIp);
-        await forwarder.ForwardAsync(connection, modifiedRequest, token);
-
-        return true;
+        return new RewriteResult(RewriteStatus.Rewritten, modifiedRequest);
     }
 
     /// <summary>
@@ -136,7 +164,7 @@ public sealed class ReverseProxy
                 var span = kvp.Value.IsSingleSegment ? kvp.Value.FirstSpan : kvp.Value.ToArray();
                 var cookie = Encoding.ASCII.GetString(span);
 
-                // Look for RPLPATH=path pattern
+                // Look for REVERSE_COOKIE=path pattern
                 var pattern = $"{ReverseCookieName}=";
                 var idx = cookie.IndexOf(pattern, StringComparison.Ordinal);
                 if (idx >= 0)

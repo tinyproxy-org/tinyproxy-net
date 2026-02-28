@@ -56,27 +56,26 @@ public sealed class SocksUpstreamProxy
 
     /// <summary>
     /// Performs SOCKS4 handshake.
-    /// Aligns with SOCKS4 protocol specification.
+    /// tinyproxy C uses SOCKS4a framing (fake destination IP + hostname) for SOCKS4 upstream.
     /// </summary>
     private async ValueTask Socks4HandshakeAsync(Socket socket, string targetHost, int targetPort, CancellationToken token)
     {
-        // SOCKS4 only supports IPv4 addresses
-        if (!System.Net.IPAddress.TryParse(targetHost, out var ipAddress) ||
-            ipAddress.AddressFamily != AddressFamily.InterNetwork)
-            throw new NotSupportedException($"SOCKS4 requires IPv4 address, got: {targetHost}");
-
-        var ipBytes = ipAddress.GetAddressBytes();
+        var hostBytes = Encoding.ASCII.GetBytes(targetHost);
+        if (hostBytes.Length > byte.MaxValue)
+            throw new InvalidOperationException("SOCKS4a: Target host too long");
 
         // SOCKS4 connect request:
         // +----+----+----+----+----+----+----+----+----+----+....+----+
         // | VN | CD | DSTPORT |      DSTIP        | USERID       |NULL|
-        // +----+----+----+----+----+----+----+----+----+----+....+----+
-        //    1    1      2           4           variable       1
+        // +----+----+----+----+----+----+----+----+----+----+....+----+....+----+
+        //    1    1      2           4           variable       1   HOST    1
+        // tinyproxy C uses SOCKS4a DSTIP 0.0.0.1 and appends host.
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
         cts.CancelAfter(_timeout);
 
-        var request = ArrayPool<byte>.Shared.Rent(9 + (_config.Username?.Length ?? 0) + 1);
+        var userLength = _config.Username?.Length ?? 0;
+        var request = ArrayPool<byte>.Shared.Rent(9 + userLength + hostBytes.Length + 1);
 
         try
         {
@@ -87,24 +86,27 @@ public sealed class SocksUpstreamProxy
             request[2] = (byte)((targetPort >> 8) & 0xFF);
             request[3] = (byte)(targetPort & 0xFF);
 
-            // IP address
-            Array.Copy(ipBytes, 0, request, 4, 4);
+            // SOCKS4a fake IP (0.0.0.1). Host is sent after USERID.
+            request[4] = 0;
+            request[5] = 0;
+            request[6] = 0;
+            request[7] = 1;
 
             // User ID (if provided)
+            var offset = 8;
             if (!string.IsNullOrEmpty(_config.Username))
             {
                 var userBytes = Encoding.ASCII.GetBytes(_config.Username);
-                Array.Copy(userBytes, 0, request, 8, userBytes.Length);
-                request[8 + userBytes.Length] = 0; // Null terminator
-            }
-            else
-            {
-                request[8] = 0; // Null terminator for empty user ID
+                Array.Copy(userBytes, 0, request, offset, userBytes.Length);
+                offset += userBytes.Length;
             }
 
-            var requestLength = 8 + (_config.Username?.Length ?? 0) + 1;
+            request[offset++] = 0; // USERID terminator
+            Array.Copy(hostBytes, 0, request, offset, hostBytes.Length);
+            offset += hostBytes.Length;
+            request[offset++] = 0; // HOST terminator
 
-            await socket.SendAllAsync(request.AsMemory(0, requestLength), cts.Token).ConfigureAwait(false);
+            await socket.SendAllAsync(request.AsMemory(0, offset), cts.Token).ConfigureAwait(false);
 
             // SOCKS4 response:
             // +----+----+----+----+----+----+----+----+

@@ -33,6 +33,13 @@ public sealed class TransparentProxy
         if (!string.IsNullOrEmpty(hostHeader))
             if (TryParseHostPort(hostHeader, out var host, out var port))
             {
+                // Prevent connections to the proxy itself.
+                if (IsLocalAddress(host))
+                {
+                    _logger.LogWarning($"Transparent proxy destination {host} is local, rejecting");
+                    return null;
+                }
+
                 if (_config.Verbose) _logger.LogInfo($"Transparent proxy using Host header: {host}:{port}");
                 return (host, port);
             }

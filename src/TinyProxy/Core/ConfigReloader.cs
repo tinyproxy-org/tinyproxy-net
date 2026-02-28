@@ -18,8 +18,7 @@ public sealed class ConfigReloader : IDisposable
     private const int ReloadDebounceMs = 500; // Debounce rapid file changes
     private const int MinReloadIntervalMs = 1000; // Minimum time between reloads
     private bool _disposed;
-    private string? _lastConfigContent;
-    private bool _lastConfigWasMissing;
+    private string? _lastConfigSignature;
 
     public ConfigReloader(
         ILogger logger,
@@ -99,25 +98,17 @@ public sealed class ConfigReloader : IDisposable
 
             _logger.LogInfo($"Reloading configuration from {_configPath}");
 
-            Configuration newConfig;
-            string? configContent = null;
-            var configMissing = false;
-
-            if (File.Exists(_configPath))
+            if (!File.Exists(_configPath))
             {
-                configContent = File.ReadAllText(_configPath);
-                newConfig = ConfigParser.Parse(configContent);
-            }
-            else
-            {
-                _logger.LogWarning($"Config file not found, using default configuration");
-                newConfig = Configuration.Default;
-                configMissing = true;
+                _logger.LogWarning($"Config file not found, keeping last known good configuration");
+                return;
             }
 
-            var configUnchanged =
-                _lastConfigWasMissing == configMissing &&
-                string.Equals(_lastConfigContent, configContent, StringComparison.Ordinal);
+            var configContent = File.ReadAllText(_configPath);
+            var newConfig = ConfigParser.Parse(configContent);
+            var configSignature = BuildConfigSignature(configContent, newConfig);
+
+            var configUnchanged = string.Equals(_lastConfigSignature, configSignature, StringComparison.Ordinal);
 
             if (configUnchanged)
             {
@@ -126,14 +117,41 @@ public sealed class ConfigReloader : IDisposable
             }
 
             _reloadAction(newConfig);
-            _lastConfigContent = configContent;
-            _lastConfigWasMissing = configMissing;
+            _lastConfigSignature = configSignature;
             _logger.LogInfo("Configuration reloaded successfully");
         }
         catch (Exception ex)
         {
             _logger.LogError($"Failed to reload configuration: {ex.Message}");
         }
+    }
+
+    private string BuildConfigSignature(string configContent, Configuration config)
+    {
+        if (string.IsNullOrWhiteSpace(config.FilterFile)) return configContent;
+
+        var filterPath = ResolveFilterFilePath(config.FilterFile);
+        if (!File.Exists(filterPath)) return configContent;
+
+        try
+        {
+            var filterContent = File.ReadAllText(filterPath);
+            return string.Concat(configContent, "\n#FILTER#", filterPath, "\n", filterContent);
+        }
+        catch
+        {
+            return configContent;
+        }
+    }
+
+    private string ResolveFilterFilePath(string filterFile)
+    {
+        if (Path.IsPathRooted(filterFile)) return filterFile;
+
+        var baseDir = Path.GetDirectoryName(_configPath);
+        if (string.IsNullOrEmpty(baseDir)) return filterFile;
+
+        return Path.Combine(baseDir, filterFile);
     }
 
     /// <summary>

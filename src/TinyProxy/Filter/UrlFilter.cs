@@ -13,11 +13,13 @@ public sealed class UrlFilter
     private readonly List<FilterRule> _regexRules;
     private readonly List<FilterRule> _globRules;
     private const int RegexTimeoutMs = 5000; // 5 second timeout for regex matching
+    public bool IsEnabled { get; }
 
     public UrlFilter(Configuration config, ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = logger ?? new ConsoleLogger();
+        IsEnabled = HasConfiguredFilter(config);
 
         // Parse filter regexes into rules
         _regexRules = new List<FilterRule>();
@@ -46,15 +48,24 @@ public sealed class UrlFilter
             }
             catch (ArgumentException ex)
             {
-                // Invalid regex, log but don't crash
-                _logger.LogWarning($"Invalid filter pattern: {pattern}, error: {ex.Message}");
+                throw new InvalidOperationException($"Invalid filter pattern: {pattern}", ex);
             }
             catch (RegexMatchTimeoutException ex)
             {
-                // Regex too complex, skip this pattern
-                _logger.LogWarning($"Filter pattern too complex (ReDoS risk): {pattern}, error: {ex.Message}");
+                throw new InvalidOperationException($"Filter pattern timed out during compilation: {pattern}", ex);
             }
         }
+    }
+
+    private static bool HasConfiguredFilter(Configuration config)
+    {
+        if (!string.IsNullOrWhiteSpace(config.FilterFile)) return true;
+
+        foreach (var pattern in config.FilterPatterns)
+            if (!string.IsNullOrWhiteSpace(pattern))
+                return true;
+
+        return false;
     }
 
     /// <summary>
@@ -63,8 +74,8 @@ public sealed class UrlFilter
     /// </summary>
     public bool IsAllowed(string url)
     {
-        // If no filters configured, allow all
-        if (_regexRules.Count == 0 && _globRules.Count == 0) return true;
+        // When default deny is enabled, empty rule set denies by default.
+        if (_regexRules.Count == 0 && _globRules.Count == 0) return !_config.FilterDefaultDeny;
 
         var matched = false;
 
@@ -184,6 +195,11 @@ public sealed class UrlFilter
 
     private static string GetUrlFilterTarget(Protocol.Http.HttpRequest request)
     {
+        // tinyproxy C filters CONNECT by the original URL token (host:port),
+        // not by a synthesized absolute URI.
+        if (request.Method == Protocol.Http.HttpMethod.Connect)
+            return request.Uri;
+
         if (request.Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             request.Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             return request.Uri;

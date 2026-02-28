@@ -88,7 +88,7 @@ public sealed class HttpForwarder
             // Check if upstream proxy is configured
             if (upstream != null)
             {
-                serverSocket = await ConnectViaUpstreamAsync(upstream, host, port, token).ConfigureAwait(false);
+                serverSocket = await ConnectViaUpstreamAsync(upstream, host, port, connection.ClientSocket, token).ConfigureAwait(false);
             }
             else
             {
@@ -153,14 +153,50 @@ public sealed class HttpForwarder
         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
         {
             _stats.IncrementFailedRequests();
-            statusCode = 502;
-            await SendErrorAsync(connection.ClientSocket, 502, "Bad Gateway", $"Could not connect to {host}:{port}", token).ConfigureAwait(false);
+            if (upstream == null)
+            {
+                statusCode = 500;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    $"Could not connect to {host}:{port}",
+                    token).ConfigureAwait(false);
+            }
+            else
+            {
+                statusCode = 502;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    502,
+                    "Bad Gateway",
+                    $"Could not connect to {host}:{port}",
+                    token).ConfigureAwait(false);
+            }
         }
         catch (TimeoutException)
         {
             _stats.IncrementFailedRequests();
-            statusCode = 504;
-            await SendErrorAsync(connection.ClientSocket, 504, "Gateway Timeout", "Server response timeout", token).ConfigureAwait(false);
+            if (upstream == null)
+            {
+                statusCode = 500;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    "Server response timeout",
+                    token).ConfigureAwait(false);
+            }
+            else
+            {
+                statusCode = 504;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    504,
+                    "Gateway Timeout",
+                    "Server response timeout",
+                    token).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -178,8 +214,21 @@ public sealed class HttpForwarder
         {
             _logger.LogError($"Forward error: {ex.Message}");
             _stats.IncrementFailedRequests();
-            statusCode = 502;
-            await SendErrorAsync(connection.ClientSocket, 502, "Bad Gateway", ex.Message, token).ConfigureAwait(false);
+            if (upstream == null)
+            {
+                statusCode = 500;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    ex.Message,
+                    token).ConfigureAwait(false);
+            }
+            else
+            {
+                statusCode = 502;
+                await SendErrorAsync(connection.ClientSocket, 502, "Bad Gateway", ex.Message, token).ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -201,6 +250,7 @@ public sealed class HttpForwarder
         UpstreamProxyConfig upstream,
         string targetHost,
         int targetPort,
+        Socket clientSocket,
         CancellationToken token)
     {
         // Handle SOCKS upstream proxies
@@ -212,6 +262,24 @@ public sealed class HttpForwarder
 
         // HTTP upstream proxy
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+
+        socket.BindToSameIp(clientSocket, _config);
+        if (_config.BindAddresses.Count > 0)
+        {
+            var bindAddress = _config.BindAddresses.FirstOrDefault();
+            if (!string.IsNullOrEmpty(bindAddress))
+            {
+                await socket.ConnectAndBindAsync(
+                    upstream.Host,
+                    upstream.Port,
+                    _config.Timeout,
+                    bindAddress,
+                    token).ConfigureAwait(false);
+                RecordPotentialLoopEndpoint(socket, upstream.Port);
+                return socket;
+            }
+        }
+
         await socket.ConnectAsync(upstream.Host, upstream.Port, _config.Timeout, token).ConfigureAwait(false);
         RecordPotentialLoopEndpoint(socket, upstream.Port);
 
@@ -248,6 +316,7 @@ public sealed class HttpForwarder
             var hopByHopHeaders = ProxyConstants.HopByHopHeadersSet;
             var connectionTokenHeaders = ExtractConnectionTokenHeaders(request);
             string? upstreamViaHeader = null;
+            var preserveClientProxyAuthorization = !IsLocalBasicAuthEnabled();
 
             // Apply anonymous filter if enabled (aligns with tinyproxy C's anonymous.c)
             var anonymousFilter = new AnonymousFilter(_config.AnonymousAllowedHeaders);
@@ -256,7 +325,9 @@ public sealed class HttpForwarder
             {
                 // Skip hop-by-hop headers
                 // Keep Transfer-Encoding for request-body semantics (e.g. chunked).
-                if (!string.Equals(name, "Transfer-Encoding", StringComparison.OrdinalIgnoreCase) &&
+                var isProxyAuthorization = string.Equals(name, "Proxy-Authorization", StringComparison.OrdinalIgnoreCase);
+                if ((!isProxyAuthorization || !preserveClientProxyAuthorization) &&
+                    !string.Equals(name, "Transfer-Encoding", StringComparison.OrdinalIgnoreCase) &&
                     hopByHopHeaders.Contains(name))
                     return;
 
@@ -323,12 +394,7 @@ public sealed class HttpForwarder
                 sb.Append(viaProtocolToken).Append(' ').Append(viaName).Append(ProxyConstants.Crlf);
             }
 
-            // Add X-Forwarded-For with actual client IP
-            sb.Append("X-Forwarded-For: ").Append(_clientIp).Append(ProxyConstants.Crlf);
-            sb.Append("X-Forwarded-Host: ").Append(host).Append(ProxyConstants.Crlf);
-            sb.Append("X-Forwarded-Proto: http").Append(ProxyConstants.Crlf);
             sb.Append("Connection: close").Append(ProxyConstants.Crlf);
-            if (useAbsoluteUri) sb.Append("Proxy-Connection: close").Append(ProxyConstants.Crlf);
 
             // Add X-Tinyproxy header if configured
             // Aligns with tinyproxy C's AddXTinyproxy option
@@ -338,6 +404,9 @@ public sealed class HttpForwarder
             // Aligns with tinyproxy C's add_headers functionality
             foreach (var header in _config.CustomHeaders)
             {
+                if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(header.Name))
+                    continue;
+
                 sb.Append(header.Name).Append(": ").Append(header.Value);
                 sb.Append(ProxyConstants.Crlf);
             }
@@ -351,6 +420,11 @@ public sealed class HttpForwarder
             StringBuilderCache.Release(sb);
             throw;
         }
+    }
+
+    private bool IsLocalBasicAuthEnabled()
+    {
+        return _config.BasicAuth != null || _config.BasicAuthUsers.Count > 0;
     }
 
     private static async ValueTask<long> SendBodyAsync(
@@ -447,25 +521,27 @@ public sealed class HttpForwarder
         HttpRequest request,
         CancellationToken token)
     {
-        if (HasChunkedTransferEncoding(request))
+        // tinyproxy C behavior (reqs.c): Content-Length takes precedence over chunked.
+        if (request.ContentLength.HasValue)
         {
-            await ForwardChunkedBodyAsync(clientSocket, serverSocket, request.Body, token).ConfigureAwait(false);
+            if (request.ContentLength.Value <= 0) return;
+
+            var contentLength = request.ContentLength.Value;
+            var sentFromBuffer = await SendBodyAsync(serverSocket, request.Body, contentLength, token).ConfigureAwait(false);
+            var remainingBytes = contentLength - sentFromBuffer;
+
+            if (remainingBytes <= 0) return;
+
+            await RelayRequestBodyAsync(
+                clientSocket,
+                serverSocket,
+                remainingBytes,
+                token).ConfigureAwait(false);
             return;
         }
 
-        if (!request.ContentLength.HasValue || request.ContentLength.Value <= 0) return;
-
-        var contentLength = request.ContentLength.Value;
-        var sentFromBuffer = await SendBodyAsync(serverSocket, request.Body, contentLength, token).ConfigureAwait(false);
-        var remainingBytes = contentLength - sentFromBuffer;
-
-        if (remainingBytes <= 0) return;
-
-        await RelayRequestBodyAsync(
-            clientSocket,
-            serverSocket,
-            remainingBytes,
-            token).ConfigureAwait(false);
+        if (HasChunkedTransferEncoding(request))
+            await ForwardChunkedBodyAsync(clientSocket, serverSocket, request.Body, token).ConfigureAwait(false);
     }
 
     private async ValueTask ForwardChunkedBodyAsync(
@@ -944,6 +1020,8 @@ public sealed class HttpForwarder
 
         bool isChunked = false;
         long? contentLength = null;
+        var activeHeader = ParsedResponseHeader.None;
+        var doubleCgiDetected = false;
 
         var offset = firstLineEnd + 1;
         while (offset < span.Length)
@@ -957,6 +1035,39 @@ public sealed class HttpForwarder
 
             if (line.IsEmpty) break;
 
+            if (LooksLikeHttpStatusLine(line))
+            {
+                doubleCgiDetected = true;
+                activeHeader = ParsedResponseHeader.None;
+                offset = lineEnd + 1;
+                continue;
+            }
+
+            if (doubleCgiDetected)
+            {
+                activeHeader = ParsedResponseHeader.None;
+                offset = lineEnd + 1;
+                continue;
+            }
+
+            if (IsHeaderContinuationLine(line))
+            {
+                var continuation = TextUtils.Trim(line);
+                if (activeHeader == ParsedResponseHeader.TransferEncoding)
+                {
+                    isChunked = TextUtils.IndexOfIgnoreCase(continuation, "chunked"u8) >= 0 || isChunked;
+                }
+                else if (activeHeader == ParsedResponseHeader.ContentLength &&
+                         !contentLength.HasValue &&
+                         TryParseNonNegativeContentLength(continuation, out var continuedLength))
+                {
+                    contentLength = continuedLength;
+                }
+
+                offset = lineEnd + 1;
+                continue;
+            }
+
             var colonIndex = line.IndexOf((byte)':');
             if (colonIndex > 0)
             {
@@ -965,21 +1076,54 @@ public sealed class HttpForwarder
 
                 if (HeaderNameEquals(name, "Transfer-Encoding"u8))
                 {
+                    activeHeader = ParsedResponseHeader.TransferEncoding;
                     isChunked = TextUtils.IndexOfIgnoreCase(value, "chunked"u8) >= 0;
                 }
-                else if (HeaderNameEquals(name, "Content-Length"u8) &&
-                         Utf8Parser.TryParse(value, out long parsedLength, out var consumed) &&
-                         consumed == value.Length &&
-                         parsedLength >= 0)
+                else if (HeaderNameEquals(name, "Content-Length"u8))
                 {
-                    contentLength = parsedLength;
+                    activeHeader = ParsedResponseHeader.ContentLength;
+                    if (TryParseNonNegativeContentLength(value, out var parsedLength))
+                        contentLength = parsedLength;
                 }
+                else
+                {
+                    activeHeader = ParsedResponseHeader.None;
+                }
+            }
+            else
+            {
+                activeHeader = ParsedResponseHeader.None;
             }
 
             offset = lineEnd + 1;
         }
 
         return (statusCode, isChunked, contentLength);
+    }
+
+    private static bool LooksLikeHttpStatusLine(ReadOnlySpan<byte> line)
+    {
+        if (line.Length < 5) return false;
+        return EqualsIgnoreCaseAscii(line[0], (byte)'H') &&
+               EqualsIgnoreCaseAscii(line[1], (byte)'T') &&
+               EqualsIgnoreCaseAscii(line[2], (byte)'T') &&
+               EqualsIgnoreCaseAscii(line[3], (byte)'P') &&
+               line[4] == (byte)'/';
+    }
+
+    private static bool TryParseNonNegativeContentLength(ReadOnlySpan<byte> value, out long contentLength)
+    {
+        contentLength = 0;
+        return Utf8Parser.TryParse(value, out contentLength, out var consumed) &&
+               consumed == value.Length &&
+               contentLength >= 0;
+    }
+
+    private enum ParsedResponseHeader : byte
+    {
+        None = 0,
+        TransferEncoding = 1,
+        ContentLength = 2
     }
 
     private static bool TryParseStatusCode(ReadOnlySpan<byte> statusLine, out int statusCode)
@@ -1083,7 +1227,7 @@ public sealed class HttpForwarder
 
                 if (!string.IsNullOrEmpty(reverseMagicCookiePath))
                 {
-                    sb.Append("Set-Cookie: RPLPATH=")
+                    sb.Append("Set-Cookie: yummy_magical_cookie=")
                         .Append(reverseMagicCookiePath)
                         .Append("; path=/")
                         .Append(ProxyConstants.Crlf);

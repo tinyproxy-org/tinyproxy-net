@@ -57,6 +57,12 @@ public sealed record Configuration
     public HashSet<string> DenyIPs { get; init; } = new();
 
     /// <summary>
+    /// Gets ordered ACL rules as they appear in configuration.
+    /// Aligns with tinyproxy C's first-match ACL list semantics.
+    /// </summary>
+    public List<AclRuleConfig> AccessRules { get; init; } = new();
+
+    /// <summary>
     /// Gets the filter patterns for URL filtering.
     /// Supports both regex and glob patterns (*, ?).
     /// Aligns with tinyproxy C's filter.c.
@@ -475,6 +481,22 @@ public sealed record UpstreamProxyRuleConfig
     /// Null means "upstream none" (bypass).
     /// </summary>
     public UpstreamProxyConfig? Proxy { get; init; }
+}
+
+/// <summary>
+/// Ordered ACL rule parsed from Allow/Deny directives.
+/// </summary>
+public sealed record AclRuleConfig
+{
+    /// <summary>
+    /// True for Allow, false for Deny.
+    /// </summary>
+    public required bool IsAllow { get; init; }
+
+    /// <summary>
+    /// Raw ACL pattern string.
+    /// </summary>
+    public required string Pattern { get; init; }
 }
 
 /// <summary>

@@ -41,6 +41,12 @@ public static class ProxyConstants
     public const int MaxHeaders = 10000;
 
     /// <summary>
+    /// Maximum number of parsed header entries to store.
+    /// Aligns with tinyproxy C's pseudomap MAX_SIZE in pseudomap.c.
+    /// </summary>
+    public const int MaxStoredHeaders = 256;
+
+    /// <summary>
     /// Maximum URL length allowed.
     /// Aligns with typical web server limits.
     /// </summary>

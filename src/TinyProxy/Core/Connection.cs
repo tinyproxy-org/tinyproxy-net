@@ -77,7 +77,7 @@ public sealed class Connection : IDisposable
             // Check access control (IP whitelist/blacklist) before reading request.
             // Aligns with tinyproxy C's handle_connection() ordering.
             var remoteEndPoint = _clientSocket.RemoteEndPoint;
-            if (remoteEndPoint != null && !_accessControl.IsAllowed(remoteEndPoint))
+            if (remoteEndPoint != null && !await _accessControl.IsAllowedAsync(_clientSocket, token).ConfigureAwait(false))
             {
                 _logger.LogWarning($"Access denied for {remoteEndPoint}");
                 _stats.IncrementFailedRequests();
@@ -107,6 +107,7 @@ public sealed class Connection : IDisposable
 
             _stats.IncrementRequests();
             var isStatPageRequest = IsStatPageRequest(firstRequest);
+            var wasReverseRewritten = false;
 
             // Check authentication
             var authHeader = GetAuthHeader(firstRequest, isStatPageRequest, out var statHostAuthFlow);
@@ -136,30 +137,37 @@ public sealed class Connection : IDisposable
                 return;
             }
 
-            // Check URL filter
-            if (!_urlFilter.IsRequestAllowed(firstRequest))
+            if (firstRequest.Method == Protocol.Http.HttpMethod.Connect &&
+                TextUtils.TryParseHostPort(firstRequest.Uri, 443, out _, out var connectPort))
             {
-                _logger.LogWarning($"URL filtered: {firstRequest.Uri}");
-                _stats.IncrementFailedRequests();
-                _stats.IncrementDeniedRequests();
-                await Protocol.HtmlErrorPages.ForbiddenAsync(
-                    _clientSocket,
-                    "URL filtered by proxy policy",
-                    token);
-                LogAccess(firstRequest, 403, 0);
-                return;
+                var connectFilter = new Filter.ConnectFilter(_config);
+                if (!connectFilter.IsPortAllowed((ushort)connectPort))
+                {
+                    _logger.LogWarning($"CONNECT port {connectPort} not allowed");
+                    _stats.IncrementFailedRequests();
+                    _stats.IncrementDeniedRequests();
+                    await Protocol.HtmlErrorPages.ForbiddenAsync(
+                        _clientSocket,
+                        $"Port {connectPort} is not allowed for CONNECT",
+                        token);
+                    LogAccess(firstRequest, 403, 0);
+                    return;
+                }
             }
 
-            if (_config.Verbose) _logger.LogInfo($"{firstRequest.Method} {firstRequest.Uri}");
-
-            // Check if this is a reverse proxy request
+            // Reverse rewriting must happen before filtering to align with tinyproxy C.
             if (_config.IsReverseProxyEnabled && _config.ReversePaths.Count > 0)
             {
                 var reverseProxy = new Protocol.ReverseProxy(_logger, _config, _stats, _accessLogger, _clientIp);
-                var handled = await reverseProxy.TryHandleAsync(this, firstRequest, token);
-                if (handled) return;
+                var rewriteResult = await reverseProxy.TryRewriteAsync(this, firstRequest, token).ConfigureAwait(false);
+                if (rewriteResult.Status == Protocol.ReverseProxy.RewriteStatus.ResponseSent) return;
+                if (rewriteResult.Status == Protocol.ReverseProxy.RewriteStatus.Rewritten)
+                {
+                    firstRequest = rewriteResult.Request;
+                    wasReverseRewritten = true;
+                }
 
-                if (_config.ReverseOnly)
+                if (rewriteResult.Status == Protocol.ReverseProxy.RewriteStatus.NotMatched && _config.ReverseOnly)
                 {
                     _logger.LogWarning($"ReverseOnly reject for unmapped URL: {firstRequest.Uri}");
                     _stats.IncrementFailedRequests();
@@ -172,9 +180,10 @@ public sealed class Connection : IDisposable
                 }
             }
 
-            // Check if this is a transparent proxy request
-            // In transparent mode, we need to determine the destination from the socket
-            if (_config.IsTransparentProxyEnabled)
+            // In transparent mode, determine destination before filtering.
+            if (_config.IsTransparentProxyEnabled &&
+                firstRequest.Method != Protocol.Http.HttpMethod.Connect &&
+                !IsAbsoluteFormUri(firstRequest.Uri))
             {
                 var transparentProxy = new Protocol.TransparentProxy(_logger, _config);
                 var dest = transparentProxy.GetTransparentDestination(_clientSocket, firstRequest);
@@ -191,15 +200,33 @@ public sealed class Connection : IDisposable
                     return;
                 }
 
-                // Rewrite the request URI with the transparent destination
+                // Rewrite the request URI with the transparent destination.
                 var newUri = transparentProxy.BuildAbsoluteUri(firstRequest.Uri, dest.Value.host, dest.Value.port, firstRequest.Uri);
                 firstRequest = firstRequest.WithUri(newUri);
 
                 if (_config.Verbose) _logger.LogInfo($"Transparent proxy resolved to: {firstRequest.Uri}");
             }
 
+            // Check URL filter only when filter is configured.
+            if (_urlFilter.IsEnabled && !_urlFilter.IsRequestAllowed(firstRequest))
+            {
+                _logger.LogWarning($"URL filtered: {firstRequest.Uri}");
+                _stats.IncrementFailedRequests();
+                _stats.IncrementDeniedRequests();
+                await Protocol.HtmlErrorPages.ForbiddenAsync(
+                    _clientSocket,
+                    "URL filtered by proxy policy",
+                    token);
+                LogAccess(firstRequest, 403, 0);
+                return;
+            }
+
+            if (_config.Verbose) _logger.LogInfo($"{firstRequest.Method} {firstRequest.Uri}");
+
             // Check if this is a statistics page request
-            if (!string.IsNullOrEmpty(_config.StatHost) && isStatPageRequest)
+            if (!wasReverseRewritten &&
+                !string.IsNullOrEmpty(_config.StatHost) &&
+                isStatPageRequest)
             {
                 var statsHandler = new Protocol.StatsHandler(_logger, _config, _stats);
                 await statsHandler.HandleStatsPageAsync(_clientSocket, token);
@@ -337,25 +364,15 @@ public sealed class Connection : IDisposable
     /// </summary>
     private bool IsStatPageRequest(HttpRequest request)
     {
-        if (string.IsNullOrEmpty(_config.StatHost)) return false;
+        if (!TryGetNormalizedHost(_config.StatHost, 80, out var statHost)) return false;
+        if (!TryGetNormalizedRequestHost(request, out var requestHost)) return false;
 
-        // Check if the Host header matches StatHost
-        foreach (var kvp in request.Headers)
-            if (string.Equals(kvp.Key, "Host", StringComparison.OrdinalIgnoreCase))
-            {
-                // Use span-based parsing to avoid allocation
-                var hostSpan = kvp.Value.IsSingleSegment ? kvp.Value.FirstSpan : kvp.Value.ToArray();
-                var host = System.Text.Encoding.ASCII.GetString(hostSpan);
+        return string.Equals(requestHost, statHost, StringComparison.OrdinalIgnoreCase);
+    }
 
-                // Exact match or hostname match (without port)
-                if (string.Equals(host, _config.StatHost, StringComparison.OrdinalIgnoreCase) ||
-                    host.StartsWith(_config.StatHost + ":", StringComparison.OrdinalIgnoreCase))
-                    return true;
-
-                break;
-            }
-
-        return false;
+    private static bool IsAbsoluteFormUri(string uri)
+    {
+        return uri.IndexOf("://", StringComparison.Ordinal) >= 0;
     }
 
     private void LogAccess(HttpRequest request, int statusCode, long bytesSent)
@@ -383,6 +400,28 @@ public sealed class Connection : IDisposable
 
         var span = value.IsSingleSegment ? value.FirstSpan : value.ToArray();
         return System.Text.Encoding.ASCII.GetString(span);
+    }
+
+    private static bool TryGetNormalizedRequestHost(HttpRequest request, out string host)
+    {
+        if (request.TryGetTarget(out var targetHost, out _))
+        {
+            host = targetHost;
+            return true;
+        }
+
+        return TryGetNormalizedHost(request.Host, 80, out host);
+    }
+
+    private static bool TryGetNormalizedHost(string? hostPort, int defaultPort, out string host)
+    {
+        host = string.Empty;
+        if (string.IsNullOrWhiteSpace(hostPort)) return false;
+
+        if (TextUtils.TryParseHostPort(hostPort, defaultPort, out host, out _)) return true;
+
+        host = hostPort.Trim();
+        return host.Length > 0;
     }
 
     public void Dispose()

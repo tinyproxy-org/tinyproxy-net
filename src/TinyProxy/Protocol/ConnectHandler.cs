@@ -70,6 +70,8 @@ public sealed class ConnectHandler
             return;
         }
 
+        var isDirectConnect = _config.ResolveUpstreamProxy(host) == null;
+
         try
         {
             // Connect to target server (directly or through configured upstream proxy).
@@ -77,6 +79,7 @@ public sealed class ConnectHandler
                 host,
                 port,
                 request,
+                connection.ClientSocket,
                 token).ConfigureAwait(false);
             using (serverSocket)
             {
@@ -138,29 +141,68 @@ public sealed class ConnectHandler
         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
         {
             _stats.IncrementFailedRequests();
-            await HtmlErrorPages.BadGatewayAsync(
-                connection.ClientSocket,
-                $"Connection to {host}:{port} refused",
-                token);
+            if (isDirectConnect)
+            {
+                await HtmlErrorPages.SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    $"Connection to {host}:{port} refused",
+                    token);
+            }
+            else
+            {
+                await HtmlErrorPages.BadGatewayAsync(
+                    connection.ClientSocket,
+                    $"Connection to {host}:{port} refused",
+                    token);
+            }
+
             LogConnect(request, host, port, false);
         }
         catch (TimeoutException)
         {
             _stats.IncrementFailedRequests();
-            await HtmlErrorPages.GatewayTimeoutAsync(
-                connection.ClientSocket,
-                $"Connection to {host}:{port} timed out",
-                token);
+            if (isDirectConnect)
+            {
+                await HtmlErrorPages.SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    $"Connection to {host}:{port} timed out",
+                    token);
+            }
+            else
+            {
+                await HtmlErrorPages.GatewayTimeoutAsync(
+                    connection.ClientSocket,
+                    $"Connection to {host}:{port} timed out",
+                    token);
+            }
+
             LogConnect(request, host, port, false);
         }
         catch (Exception ex)
         {
             _logger.LogError($"CONNECT error: {ex.Message}");
             _stats.IncrementFailedRequests();
-            await HtmlErrorPages.BadGatewayAsync(
-                connection.ClientSocket,
-                ex.Message,
-                token);
+            if (isDirectConnect)
+            {
+                await HtmlErrorPages.SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    ex.Message,
+                    token);
+            }
+            else
+            {
+                await HtmlErrorPages.BadGatewayAsync(
+                    connection.ClientSocket,
+                    ex.Message,
+                    token);
+            }
+
             LogConnect(request, host, port, false);
         }
     }
@@ -238,13 +280,19 @@ public sealed class ConnectHandler
         string targetHost,
         int targetPort,
         Http.HttpRequest request,
+        Socket clientSocket,
         CancellationToken token)
     {
         var upstream = _config.ResolveUpstreamProxy(targetHost);
         if (upstream == null)
         {
             var directSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await directSocket.ConnectAsync(targetHost, targetPort, _config.Timeout, token).ConfigureAwait(false);
+            await ConnectWithConfiguredBindingAsync(
+                directSocket,
+                targetHost,
+                targetPort,
+                clientSocket,
+                token).ConfigureAwait(false);
             RecordPotentialLoopEndpoint(directSocket, targetPort);
             return (directSocket, ReadOnlySequence<byte>.Empty, ReadOnlyMemory<byte>.Empty, 0);
         }
@@ -259,7 +307,12 @@ public sealed class ConnectHandler
         var upstreamSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
         try
         {
-            await upstreamSocket.ConnectAsync(upstream.Host, upstream.Port, _config.Timeout, token).ConfigureAwait(false);
+            await ConnectWithConfiguredBindingAsync(
+                upstreamSocket,
+                upstream.Host,
+                upstream.Port,
+                clientSocket,
+                token).ConfigureAwait(false);
             RecordPotentialLoopEndpoint(upstreamSocket, upstream.Port);
 
             var connectRequest = BuildHttpUpstreamConnectRequest(request, targetHost, targetPort, upstream);
@@ -298,6 +351,7 @@ public sealed class ConnectHandler
 
             sb.Append("Connection: close").Append(ProxyConstants.Crlf);
 
+            var preserveClientProxyAuthorization = !IsLocalBasicAuthEnabled();
             if (!string.IsNullOrEmpty(upstream.Username))
             {
                 var credentials = $"{upstream.Username}:{upstream.Password}";
@@ -314,7 +368,7 @@ public sealed class ConnectHandler
             void AppendFilteredHeader(string name, ReadOnlySequence<byte> value)
             {
                 if (connectionTokenHeaders.Contains(name)) return;
-                if (ShouldSkipConnectClientHeader(name)) return;
+                if (ShouldSkipConnectClientHeader(name, preserveClientProxyAuthorization)) return;
 
                 if (_config.AddViaHeader && name.Equals("Via", StringComparison.OrdinalIgnoreCase))
                 {
@@ -357,6 +411,9 @@ public sealed class ConnectHandler
 
             foreach (var customHeader in _config.CustomHeaders)
             {
+                if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(customHeader.Name))
+                    continue;
+
                 sb.Append(customHeader.Name).Append(": ").Append(customHeader.Value).Append(ProxyConstants.Crlf);
             }
 
@@ -396,11 +453,44 @@ public sealed class ConnectHandler
         return name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase) ||
-               name.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Proxy-Connection", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Te", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Trailers", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Upgrade", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldSkipConnectClientHeader(string name, bool preserveClientProxyAuthorization)
+    {
+        if (name.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase))
+            return !preserveClientProxyAuthorization;
+
+        return ShouldSkipConnectClientHeader(name);
+    }
+
+    private async ValueTask ConnectWithConfiguredBindingAsync(
+        Socket socket,
+        string host,
+        int port,
+        Socket clientSocket,
+        CancellationToken token)
+    {
+        socket.BindToSameIp(clientSocket, _config);
+        if (_config.BindAddresses.Count > 0)
+        {
+            var bindAddress = _config.BindAddresses.FirstOrDefault();
+            if (!string.IsNullOrEmpty(bindAddress))
+            {
+                await socket.ConnectAndBindAsync(host, port, _config.Timeout, bindAddress, token).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        await socket.ConnectAsync(host, port, _config.Timeout, token).ConfigureAwait(false);
+    }
+
+    private bool IsLocalBasicAuthEnabled()
+    {
+        return _config.BasicAuth != null || _config.BasicAuthUsers.Count > 0;
     }
 
     private static string GetViaProtocolToken(string? requestVersion)

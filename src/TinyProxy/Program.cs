@@ -90,10 +90,7 @@ internal class Program
 
     private static Configuration LoadConfiguration(string configPath)
     {
-        if (File.Exists(configPath)) return ConfigParser.LoadFromFile(configPath);
-
-        // Return default configuration
-        return Configuration.Default;
+        return ConfigParser.LoadFromFile(configPath);
     }
 
     private static ILogger CreateLogger(Configuration config)

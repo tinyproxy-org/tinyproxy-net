@@ -7,6 +7,12 @@ namespace TinyProxy.Filter;
 /// </summary>
 public sealed class AnonymousFilter
 {
+    private static readonly string[] s_implicitAllowedHeaders = new[]
+    {
+        "Content-Length",
+        "Content-Type"
+    };
+
     private readonly HashSet<string> _allowedHeaders;
 
     /// <summary>
@@ -23,6 +29,13 @@ public sealed class AnonymousFilter
     public AnonymousFilter(IEnumerable<string> allowedHeaders)
     {
         _allowedHeaders = new HashSet<string>(allowedHeaders, StringComparer.OrdinalIgnoreCase);
+
+        // tinyproxy C always inserts these when anonymous mode is enabled.
+        if (_allowedHeaders.Count > 0)
+        {
+            foreach (var header in s_implicitAllowedHeaders)
+                _allowedHeaders.Add(header);
+        }
     }
 
     /// <summary>

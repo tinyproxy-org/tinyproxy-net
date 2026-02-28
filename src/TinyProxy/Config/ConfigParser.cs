@@ -15,6 +15,7 @@ public sealed partial class ConfigParser
         var config = new Configuration();
         var allowIPs = new HashSet<string>();
         var denyIPs = new HashSet<string>();
+        var accessRules = new List<AclRuleConfig>();
         var filterPatterns = new List<string>();
         var allowedConnectPorts = new HashSet<ushort>();
         var anonymousAllowedHeaders = new HashSet<string>();
@@ -25,15 +26,19 @@ public sealed partial class ConfigParser
         var customHeaders = new List<HttpHeader>();
         var upstreamRules = new List<UpstreamProxyRuleConfig>();
 
-        foreach (var line in content.Split('\n'))
+        var lines = content.Split('\n');
+        for (var index = 0; index < lines.Length; index++)
         {
+            var lineNumber = index + 1;
+            var line = lines[index];
             var trimmed = line.Trim();
 
             // Skip empty lines and comments
             if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#')) continue;
 
             var match = s_directiveRegex.Match(trimmed);
-            if (!match.Success) continue;
+            if (!match.Success)
+                throw new FormatException($"Unable to parse configuration line {lineNumber}: '{trimmed}'");
 
             var directive = match.Groups[1].Value;
             var value = NormalizeDirectiveValue(match.Groups[2].Value);
@@ -71,10 +76,12 @@ public sealed partial class ConfigParser
 
                 case "allow":
                     allowIPs.Add(value);
+                    accessRules.Add(new AclRuleConfig { IsAllow = true, Pattern = value });
                     break;
 
                 case "deny":
                     denyIPs.Add(value);
+                    accessRules.Add(new AclRuleConfig { IsAllow = false, Pattern = value });
                     break;
 
                 case "filterurl":
@@ -91,19 +98,9 @@ public sealed partial class ConfigParser
                     break;
 
                 case "filter":
-                    // Can be either inline pattern or file path
-                    if (File.Exists(value))
-                    {
-                        config = config with { FilterFile = value };
-                        // Load patterns from file
-                        var filePatterns = LoadFilterFile(value);
-                        filterPatterns.AddRange(filePatterns);
-                    }
-                    else
-                    {
-                        filterPatterns.Add(value);
-                    }
-
+                    // tinyproxy C semantics: Filter directive is a file path.
+                    config = config with { FilterFile = value };
+                    filterPatterns.AddRange(LoadFilterFile(value));
                     break;
 
                 case "filterdefaultdeny":
@@ -243,6 +240,9 @@ public sealed partial class ConfigParser
                     }
 
                     break;
+
+                default:
+                    throw new FormatException($"Unknown directive '{directive}' at line {lineNumber}");
             }
         }
 
@@ -251,6 +251,7 @@ public sealed partial class ConfigParser
         {
             AllowIPs = allowIPs,
             DenyIPs = denyIPs,
+            AccessRules = accessRules,
             FilterPatterns = filterPatterns,
             AllowedConnectPorts = allowedConnectPorts,
             AnonymousAllowedHeaders = anonymousAllowedHeaders,
@@ -261,6 +262,8 @@ public sealed partial class ConfigParser
             CustomHeaders = customHeaders,
             UpstreamProxyRules = upstreamRules
         };
+
+        ValidateFilterPatterns(config);
 
         return config;
     }
@@ -528,6 +531,14 @@ public sealed partial class ConfigParser
 
     public static Configuration LoadFromFile(string path)
     {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException(
+                $"Could not open config file \"{Path.GetFullPath(path)}\".\n" +
+                "Usage: tinyproxy [-c <config-file>]\n" +
+                "Default config locations: /etc/tinyproxy/tinyproxy.conf or ./tinyproxy.conf",
+                path);
+        }
         var content = File.ReadAllText(path);
         return Parse(content);
     }
@@ -580,12 +591,8 @@ public sealed partial class ConfigParser
         {
             foreach (var line in File.ReadAllLines(path))
             {
-                var trimmed = line.Trim();
-
-                // Skip empty lines and comments
-                if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#')) continue;
-
-                patterns.Add(trimmed);
+                if (TryExtractFilterPattern(line.AsSpan(), out var pattern))
+                    patterns.Add(pattern);
             }
         }
         catch (Exception ex)
@@ -594,6 +601,58 @@ public sealed partial class ConfigParser
         }
 
         return patterns;
+    }
+
+    private static bool TryExtractFilterPattern(ReadOnlySpan<char> line, out string pattern)
+    {
+        pattern = string.Empty;
+
+        var index = 0;
+        while (index < line.Length && char.IsWhiteSpace(line[index])) index++;
+        if (index >= line.Length) return false;
+
+        var start = index;
+        while (index < line.Length)
+        {
+            var current = line[index];
+            if (char.IsWhiteSpace(current)) break;
+
+            if (current == '#' && (index == 0 || line[index - 1] != '\\'))
+                break;
+
+            index++;
+        }
+
+        if (index <= start) return false;
+
+        pattern = line[start..index].ToString();
+        return !string.IsNullOrWhiteSpace(pattern);
+    }
+
+    private static void ValidateFilterPatterns(Configuration config)
+    {
+        if (config.FilterUseGlob) return;
+
+        var options = config.FilterCaseSensitive
+            ? RegexOptions.None
+            : RegexOptions.IgnoreCase;
+
+        for (var index = 0; index < config.FilterPatterns.Count; index++)
+        {
+            var pattern = config.FilterPatterns[index];
+            if (string.IsNullOrWhiteSpace(pattern)) continue;
+
+            try
+            {
+                _ = new Regex(pattern, options);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new FormatException(
+                    $"Invalid filter regex at pattern #{index + 1}: '{pattern}'",
+                    ex);
+            }
+        }
     }
 
     private static List<string> TokenizeArguments(string value)

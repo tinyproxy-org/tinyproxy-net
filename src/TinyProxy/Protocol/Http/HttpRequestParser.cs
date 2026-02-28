@@ -78,6 +78,13 @@ public sealed class HttpRequestParser
         {
             if (currentHeaderName == null || currentHeaderValue == null) return true;
 
+            if (headerLines.Count >= ProxyConstants.MaxStoredHeaders)
+            {
+                currentHeaderName = null;
+                currentHeaderValue = null;
+                return true;
+            }
+
             var valueBytes = currentHeaderValue.WrittenMemory.ToArray();
             var headerValueSequence = new ReadOnlySequence<byte>(valueBytes);
             headerLines.Add(new KeyValuePair<string, ReadOnlySequence<byte>>(currentHeaderName, headerValueSequence));
@@ -158,6 +165,13 @@ public sealed class HttpRequestParser
             if (headerNameSpan.IsEmpty) continue;
 
             var headerValueSpan = TextUtils.Trim(headerLine[(colonIndex + 1)..]);
+
+            if (headerLines.Count >= ProxyConstants.MaxStoredHeaders)
+            {
+                currentHeaderName = null;
+                currentHeaderValue = null;
+                continue;
+            }
 
             currentHeaderName = GetAsciiString(headerNameSpan);
             currentHeaderValue = new ArrayBufferWriter<byte>(Math.Max(headerValueSpan.Length, 16));

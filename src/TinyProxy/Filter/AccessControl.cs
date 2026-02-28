@@ -3,131 +3,164 @@ using System.Collections.Concurrent;
 namespace TinyProxy.Filter;
 
 /// <summary>
-/// IP-based access control (whitelist/blacklist).
+/// IP/domain access control.
 /// Aligns with tinyproxy C's acl.c implementation.
 /// </summary>
 public sealed class AccessControl
 {
-    private readonly Configuration _config;
-    private readonly List<AccessRule> _allowRules;
-    private readonly List<AccessRule> _denyRules;
+    private readonly List<AccessRule> _orderedRules;
     private readonly ConcurrentDictionary<string, string> _dnsCache;
-    private readonly ConcurrentDictionary<string, IPAddress> _dnsForwardCache;
+    private readonly ConcurrentDictionary<string, IPAddress[]> _dnsForwardCache;
 
     public AccessControl(Configuration config)
     {
-        _config = config ?? throw new ArgumentNullException(nameof(config));
-        _allowRules = ParseRules(config.AllowIPs, AccessType.Allow);
-        _denyRules = ParseRules(config.DenyIPs, AccessType.Deny);
+        ArgumentNullException.ThrowIfNull(config);
+
+        _orderedRules = BuildOrderedRules(config);
         _dnsCache = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        _dnsForwardCache = new ConcurrentDictionary<string, IPAddress>(StringComparer.OrdinalIgnoreCase);
+        _dnsForwardCache = new ConcurrentDictionary<string, IPAddress[]>(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
-    /// Checks if a client IP is allowed to connect.
-    /// Aligns with tinyproxy C's check_acl function.
+    /// Checks whether a client IP/hostname is allowed.
     /// </summary>
     public bool IsAllowed(string clientIp)
     {
-        // If allow rules have entries, only allow IPs that match allow rules
-        if (_allowRules.Count > 0) return CheckRules(clientIp, _allowRules, _dnsForwardCache);
+        if (_orderedRules.Count == 0) return true;
 
-        // If deny rules have entries, deny IPs that match deny rules
-        if (_denyRules.Count > 0) return !CheckRules(clientIp, _denyRules, _dnsForwardCache);
+        var isIpAddress = IPAddress.TryParse(clientIp, out var parsedIpAddress);
 
-        // No filtering configured, allow all
-        return true;
+        foreach (var rule in _orderedRules)
+        {
+            if (!TryMatchRuleSync(rule, clientIp, parsedIpAddress, isIpAddress)) continue;
+            return rule.AccessType == AccessType.Allow;
+        }
+
+        // tinyproxy C default when ACL exists: deny.
+        return false;
     }
 
     /// <summary>
-    /// Checks if a client IP is allowed to connect (EndPoint overload).
+    /// Checks whether a client endpoint is allowed.
     /// </summary>
     public bool IsAllowed(EndPoint endPoint)
     {
         if (endPoint is IPEndPoint ipEndPoint) return IsAllowed(ipEndPoint.Address.ToString());
 
-        // Allow non-IP endpoints (e.g., Unix domain sockets)
-        return true;
+        return _orderedRules.Count == 0;
     }
 
     /// <summary>
-    /// Checks if a connection from a specific hostname is allowed.
-    /// Performs DNS lookup to resolve hostname to IP(s) and checks ACL.
-    /// Aligns with tinyproxy C's acl_string_processing.
+    /// Checks whether a client hostname is allowed.
     /// </summary>
     public async Task<bool> IsAllowedAsync(string hostname, CancellationToken cancellationToken = default)
     {
-        // First, check direct IP pattern match
-        if (IPAddress.TryParse(hostname, out var ipAddress)) return IsAllowed(ipAddress.ToString());
+        if (_orderedRules.Count == 0) return true;
 
-        // Try to resolve hostname to IP and check
+        if (IPAddress.TryParse(hostname, out var ipAddress))
+            return IsAllowed(ipAddress.ToString());
+
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken).ConfigureAwait(false);
             foreach (var address in addresses)
-                if (!IsAllowed(address.ToString()))
+            {
+                var endpoint = new IPEndPoint(address, 0);
+                if (!await IsAllowedAsync(address, endpoint, cancellationToken).ConfigureAwait(false))
                     return false;
+            }
 
-            return true;
+            return addresses.Length > 0;
         }
         catch (HttpRequestException)
         {
-            // DNS resolution failed, deny
             return false;
         }
         catch (SocketException)
         {
-            // DNS resolution failed, deny
             return false;
         }
     }
 
     /// <summary>
-    /// Checks if a connection from a socket is allowed.
-    /// Performs reverse DNS lookup if needed.
-    /// Aligns with tinyproxy C's acl_string_processing with getnameinfo.
+    /// Checks whether a client socket is allowed.
     /// </summary>
     public async Task<bool> IsAllowedAsync(Socket socket, CancellationToken cancellationToken = default)
     {
-        if (socket.RemoteEndPoint is IPEndPoint ipEndPoint) return await IsAllowedAsync(ipEndPoint.Address, ipEndPoint, cancellationToken);
+        if (socket.RemoteEndPoint is IPEndPoint ipEndPoint)
+            return await IsAllowedAsync(ipEndPoint.Address, ipEndPoint, cancellationToken).ConfigureAwait(false);
 
-        return true;
+        return _orderedRules.Count == 0;
     }
 
-    /// <summary>
-    /// Checks if an IP address with its associated EndPoint is allowed.
-    /// Performs reverse DNS lookup for string-based rules.
-    /// </summary>
     private async Task<bool> IsAllowedAsync(IPAddress ipAddress, IPEndPoint endPoint, CancellationToken cancellationToken)
     {
+        if (_orderedRules.Count == 0) return true;
+
         var ipString = ipAddress.ToString();
+        string? hostname = null;
 
-        // Check numeric rules first (fast path)
-        if (_allowRules.Count > 0)
+        foreach (var rule in _orderedRules)
         {
-            if (HasNumericMatch(ipString, _allowRules)) return true;
-            // Check if allow rules require DNS lookup
-            if (_allowRules.Any(r => r.Type == RuleType.Domain))
+            var matched = false;
+
+            switch (rule.Type)
             {
-                var hostname = await GetHostnameAsync(endPoint, cancellationToken);
-                return CheckDomainMatch(hostname, _allowRules);
+                case RuleType.Ip:
+                    matched = string.Equals(ipString, rule.Pattern, StringComparison.OrdinalIgnoreCase);
+                    break;
+
+                case RuleType.Cidr:
+                    matched = rule.IPAddress != null && IsInSubnet(ipAddress, rule.IPAddress, rule.PrefixLength);
+                    break;
+
+                case RuleType.Wildcard:
+                    matched = MatchWildcard(ipString, rule.Pattern);
+                    break;
+
+                case RuleType.Domain:
+                    if (!rule.Pattern.StartsWith(".", StringComparison.Ordinal) &&
+                        await ForwardLookupContainsIpAsync(rule.Pattern, ipAddress, cancellationToken).ConfigureAwait(false))
+                    {
+                        matched = true;
+                        break;
+                    }
+
+                    hostname ??= await GetHostnameAsync(endPoint, cancellationToken).ConfigureAwait(false);
+                    matched = DomainPatternMatches(hostname, rule.Pattern);
+                    break;
             }
 
-            return false;
+            if (matched)
+                return rule.AccessType == AccessType.Allow;
         }
 
-        if (_denyRules.Count > 0)
+        return false;
+    }
+
+    private static List<AccessRule> BuildOrderedRules(Configuration config)
+    {
+        var rules = new List<AccessRule>();
+
+        if (config.AccessRules.Count > 0)
         {
-            if (HasNumericMatch(ipString, _denyRules)) return false;
-            // Check if deny rules require DNS lookup
-            if (_denyRules.Any(r => r.Type == RuleType.Domain))
+            foreach (var configuredRule in config.AccessRules)
             {
-                var hostname = await GetHostnameAsync(endPoint, cancellationToken);
-                return !CheckDomainMatch(hostname, _denyRules);
+                if (string.IsNullOrWhiteSpace(configuredRule.Pattern)) continue;
+                var parsedRule = ParseRule(
+                    configuredRule.Pattern,
+                    configuredRule.IsAllow ? AccessType.Allow : AccessType.Deny);
+                if (parsedRule != null) rules.Add(parsedRule);
             }
+
+            return rules;
         }
 
-        return true;
+        // Backward compatibility for in-memory configs built via AllowIPs/DenyIPs.
+        // Ordering is only guaranteed when AccessRules is populated by parser.
+        rules.AddRange(ParseRules(config.AllowIPs, AccessType.Allow));
+        rules.AddRange(ParseRules(config.DenyIPs, AccessType.Deny));
+        return rules;
     }
 
     /// <summary>
@@ -150,19 +183,20 @@ public sealed class AccessControl
 
     /// <summary>
     /// Parses a single rule pattern.
-    /// Supports: IP, CIDR, wildcard (*), and domain suffix (.domain.com).
+    /// Supports: IP, CIDR, wildcard (*), and domain pattern.
     /// </summary>
     private static AccessRule? ParseRule(string pattern, AccessType accessType)
     {
         pattern = pattern.Trim();
 
-        // Check for domain suffix (starts with '.')
-        if (pattern.StartsWith('.')) return new AccessRule(RuleType.Domain, pattern.Substring(1), accessType);
+        // Keep the leading dot to preserve tinyproxy C semantics:
+        // ".example.com" must not match bare "example.com".
+        if (pattern.StartsWith(".", StringComparison.Ordinal))
+            return new AccessRule(RuleType.Domain, pattern, accessType);
 
-        // Check for wildcard pattern
-        if (pattern.Contains('*')) return new AccessRule(RuleType.Wildcard, pattern, accessType);
+        if (pattern.Contains('*'))
+            return new AccessRule(RuleType.Wildcard, pattern, accessType);
 
-        // Check for CIDR notation
         var slashIndex = pattern.IndexOf('/');
         if (slashIndex > 0 && slashIndex < pattern.Length - 1)
         {
@@ -172,94 +206,109 @@ public sealed class AccessControl
                 return new AccessRule(RuleType.Cidr, pattern, accessType, ipAddress, prefixLen);
         }
 
-        // Try as plain IP address
-        if (IPAddress.TryParse(pattern, out var ip)) return new AccessRule(RuleType.Ip, pattern, accessType, ip);
+        if (IPAddress.TryParse(pattern, out var ip))
+            return new AccessRule(RuleType.Ip, pattern, accessType, ip);
 
-        // Treat as domain name
         return new AccessRule(RuleType.Domain, pattern, accessType);
     }
 
-    /// <summary>
-    /// Checks if an IP matches any of the given rules.
-    /// Fast path for numeric IP/CIDR/wildcard rules.
-    /// </summary>
-    private static bool CheckRules(string ip, List<AccessRule> rules, ConcurrentDictionary<string, IPAddress> dnsCache)
+    private bool TryMatchRuleSync(AccessRule rule, string candidate, IPAddress? parsedIpAddress, bool isIpAddress)
     {
-        foreach (var rule in rules)
-            switch (rule.Type)
+        switch (rule.Type)
+        {
+            case RuleType.Ip:
+                return isIpAddress && string.Equals(candidate, rule.Pattern, StringComparison.OrdinalIgnoreCase);
+
+            case RuleType.Cidr:
+                return isIpAddress &&
+                       parsedIpAddress != null &&
+                       rule.IPAddress != null &&
+                       IsInSubnet(parsedIpAddress, rule.IPAddress, rule.PrefixLength);
+
+            case RuleType.Wildcard:
+                return isIpAddress && MatchWildcard(candidate, rule.Pattern);
+
+            case RuleType.Domain:
+                if (isIpAddress)
+                {
+                    if (parsedIpAddress == null || rule.Pattern.StartsWith(".", StringComparison.Ordinal))
+                        return false;
+
+                    return ForwardLookupContainsIp(rule.Pattern, parsedIpAddress);
+                }
+
+                return DomainPatternMatches(candidate, rule.Pattern);
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool DomainPatternMatches(string hostname, string pattern)
+    {
+        if (string.IsNullOrEmpty(hostname)) return false;
+        if (hostname.Length < pattern.Length) return false;
+        return hostname.EndsWith(pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ForwardLookupContainsIp(string host, IPAddress ipAddress)
+    {
+        if (!_dnsForwardCache.TryGetValue(host, out var addresses))
+        {
+            try
             {
-                case RuleType.Ip:
-                    if (string.Equals(ip, rule.Pattern, StringComparison.OrdinalIgnoreCase))
-                        return true;
-                    break;
-
-                case RuleType.Cidr:
-                    if (rule.IPAddress != null && IPAddress.TryParse(ip, out var ipAddr))
-                        if (IsInSubnet(ipAddr, rule.IPAddress, rule.PrefixLength))
-                            return true;
-                    break;
-
-                case RuleType.Wildcard:
-                    if (MatchWildcard(ip, rule.Pattern))
-                        return true;
-                    break;
-
-                case RuleType.Domain:
-                    // Domain rules require DNS lookup, handled separately
-                    break;
+                addresses = Dns.GetHostAddresses(host);
             }
+            catch (SocketException)
+            {
+                addresses = Array.Empty<IPAddress>();
+            }
+
+            CacheForwardLookup(host, addresses);
+        }
+
+        foreach (var address in addresses)
+        {
+            if (address.Equals(ipAddress)) return true;
+        }
 
         return false;
     }
 
-    /// <summary>
-    /// Checks if an IP matches any numeric rules (IP, CIDR, wildcard).
-    /// </summary>
-    private static bool HasNumericMatch(string ip, List<AccessRule> rules)
+    private async ValueTask<bool> ForwardLookupContainsIpAsync(string host, IPAddress ipAddress, CancellationToken cancellationToken)
     {
-        foreach (var rule in rules)
-            switch (rule.Type)
+        if (!_dnsForwardCache.TryGetValue(host, out var addresses))
+        {
+            try
             {
-                case RuleType.Ip:
-                    if (string.Equals(ip, rule.Pattern, StringComparison.OrdinalIgnoreCase))
-                        return true;
-                    break;
-
-                case RuleType.Cidr:
-                    if (rule.IPAddress != null && IPAddress.TryParse(ip, out var ipAddr))
-                        if (IsInSubnet(ipAddr, rule.IPAddress, rule.PrefixLength))
-                            return true;
-                    break;
-
-                case RuleType.Wildcard:
-                    if (MatchWildcard(ip, rule.Pattern))
-                        return true;
-                    break;
+                addresses = await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
             }
+            catch (SocketException)
+            {
+                addresses = Array.Empty<IPAddress>();
+            }
+
+            CacheForwardLookup(host, addresses);
+        }
+
+        foreach (var address in addresses)
+        {
+            if (address.Equals(ipAddress)) return true;
+        }
 
         return false;
     }
 
-    /// <summary>
-    /// Checks if a hostname matches any domain rules.
-    /// </summary>
-    private static bool CheckDomainMatch(string hostname, List<AccessRule> rules)
+    private void CacheForwardLookup(string host, IPAddress[] addresses)
     {
-        foreach (var rule in rules)
-            if (rule.Type == RuleType.Domain)
-            {
-                // Check suffix match
-                if (hostname.EndsWith(rule.Pattern, StringComparison.OrdinalIgnoreCase))
-                    // Ensure it's a whole domain boundary (either matches exactly or has a dot before)
-                    if (hostname.Length == rule.Pattern.Length ||
-                        hostname[hostname.Length - rule.Pattern.Length - 1] == '.')
-                        return true;
+        if (_dnsForwardCache.Count >= ProxyConstants.MaxDnsCacheSize)
+        {
+            var keysToRemove = _dnsForwardCache.Keys.Take(100).ToList();
+            foreach (var key in keysToRemove)
+                _dnsForwardCache.TryRemove(key, out _);
+        }
 
-                // Check exact match
-                if (string.Equals(hostname, rule.Pattern, StringComparison.OrdinalIgnoreCase)) return true;
-            }
-
-        return false;
+        _dnsForwardCache[host] = addresses;
     }
 
     /// <summary>
@@ -280,7 +329,6 @@ public sealed class AccessControl
             // Cache with LRU eviction
             if (_dnsCache.Count >= ProxyConstants.MaxDnsCacheSize)
             {
-                // Remove some entries to keep cache size under control
                 var keysToRemove = _dnsCache.Keys.Take(100).ToList();
                 foreach (var key in keysToRemove) _dnsCache.TryRemove(key, out _);
             }
@@ -290,7 +338,6 @@ public sealed class AccessControl
         }
         catch (SocketException)
         {
-            // Reverse DNS failed
             return string.Empty;
         }
     }
@@ -307,6 +354,10 @@ public sealed class AccessControl
         var subnetBytes = subnet.GetAddressBytes();
 
         if (ipBytes.Length != subnetBytes.Length)
+            return false;
+
+        var maxPrefixLength = ipBytes.Length * 8;
+        if (prefixLength < 0 || prefixLength > maxPrefixLength)
             return false;
 
         var fullBytes = prefixLength / 8;
