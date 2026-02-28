@@ -1,5 +1,8 @@
+using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.Text;
+using TinyProxy.Core;
 
 namespace TinyProxy.Protocol.Http;
 
@@ -9,9 +12,12 @@ namespace TinyProxy.Protocol.Http;
 public sealed class HttpRequest
 {
     public HttpMethod Method { get; init; }
+    public string? RawMethod { get; init; }
     public string Uri { get; init; } = string.Empty;
     public string Version { get; init; } = "HTTP/1.1";
     public Dictionary<string, ReadOnlySequence<byte>> Headers { get; init; } = new();
+    public IReadOnlyList<KeyValuePair<string, ReadOnlySequence<byte>>> HeaderLines { get; init; } =
+        Array.Empty<KeyValuePair<string, ReadOnlySequence<byte>>>();
     public ReadOnlySequence<byte> Body { get; init; }
 
     // Common headers - parsed for quick access
@@ -31,28 +37,21 @@ public sealed class HttpRequest
         port = 80;
 
         if (Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-        {
-            return TryParseHttpUri(Uri, out host, out port, out _);
-        }
+            return TryParseHttpUri(Uri, 80, out host, out port, out _);
 
         if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-        {
-            return TryParseHttpUri(Uri, out host, out port, out _);
-        }
+            return TryParseHttpUri(Uri, 443, out host, out port, out _);
 
         // Relative URI - use Host header
-        if (!string.IsNullOrEmpty(Host))
-        {
-            return TryParseHostHeader(Host, out host, out port);
-        }
+        if (!string.IsNullOrEmpty(Host)) return TextUtils.TryParseHostPort(Host, 80, out host, out port);
 
         return false;
     }
 
-    private static bool TryParseHttpUri(string uri, out string host, out int port, out string path)
+    private static bool TryParseHttpUri(string uri, int defaultPort, out string host, out int port, out string path)
     {
         host = string.Empty;
-        port = 80;
+        port = defaultPort;
         path = "/";
 
         // Skip protocol
@@ -60,81 +59,83 @@ public sealed class HttpRequest
 
         // Find path separator
         var slashIndex = afterProto.IndexOf('/');
-        if (slashIndex < 0)
-        {
-            slashIndex = afterProto.Length;
-        }
+        if (slashIndex < 0) slashIndex = afterProto.Length;
 
         var authorityPart = afterProto.Substring(0, slashIndex);
         path = slashIndex < afterProto.Length ? afterProto.Substring(slashIndex) : "/";
 
-        return TryParseHostHeader(authorityPart, out host, out port);
-    }
+        // tinyproxy C strips user:pass@ before host/port parsing.
+        var atIndex = authorityPart.LastIndexOf('@');
+        if (atIndex >= 0 && atIndex + 1 < authorityPart.Length)
+            authorityPart = authorityPart[(atIndex + 1)..];
 
-    private static bool TryParseHostHeader(string authority, out string host, out int port)
-    {
-        host = string.Empty;
-        port = 80;
-
-        // Find IPv6 brackets or colon
-        var bracketStart = authority.IndexOf('[');
-        if (bracketStart >= 0)
-        {
-            // IPv6 address [::1]:port
-            var bracketEnd = authority.IndexOf(']', bracketStart);
-            if (bracketEnd < 0) return false;
-
-            host = authority.Substring(bracketStart + 1, bracketEnd - bracketStart - 1);
-
-            if (bracketEnd + 1 < authority.Length && authority[bracketEnd + 1] == ':')
-            {
-                _ = int.TryParse(authority.Substring(bracketEnd + 2), out port);
-            }
-        }
-        else
-        {
-            // IPv4 or hostname
-            var colonIndex = authority.IndexOf(':');
-            if (colonIndex >= 0)
-            {
-                host = authority.Substring(0, colonIndex);
-                _ = int.TryParse(authority.Substring(colonIndex + 1), out port);
-            }
-            else
-            {
-                host = authority;
-            }
-        }
-
-        return !string.IsNullOrEmpty(host);
+        return TextUtils.TryParseHostPort(authorityPart, defaultPort, out host, out port);
     }
 
     public string GetHeader(string name)
     {
         if (Headers.TryGetValue(name, out var value))
         {
-            return value.Length > 4096
-                ? value.Slice(0, 4096).ToString() // Truncate large headers
-                : value.ToString();
+            var data = value.Length > 4096
+                ? value.Slice(0, 4096)
+                : value;
+
+            var span = data.IsSingleSegment ? data.FirstSpan : data.ToArray();
+            return Encoding.ASCII.GetString(span);
         }
         return string.Empty;
     }
 
-    public bool HasHeader(string name) => Headers.ContainsKey(name);
+    public bool HasHeader(string name)
+    {
+        return Headers.ContainsKey(name);
+    }
+
+    public string GetMethodToken()
+    {
+        if (!string.IsNullOrWhiteSpace(RawMethod)) return RawMethod!;
+        return HttpMethodParser.ToHttpString(Method);
+    }
 
     /// <summary>
     /// Creates a copy of the request with a modified URI.
     /// </summary>
-    public HttpRequest WithUri(string newUri) => new()
+    public HttpRequest WithUri(string newUri)
     {
-        Method = Method,
-        Uri = newUri,
-        Version = Version,
-        Headers = Headers,
-        Body = Body,
-        Host = Host,
-        UserAgent = UserAgent,
-        ContentType = ContentType,
-        ContentLength = ContentLength
-    };
+        return new HttpRequest
+        {
+            Method = Method,
+            RawMethod = RawMethod,
+            Uri = newUri,
+            Version = Version,
+            Headers = Headers,
+            HeaderLines = HeaderLines,
+            Body = Body,
+            Host = Host,
+            UserAgent = UserAgent,
+            ContentType = ContentType,
+            ContentLength = ContentLength
+        };
+    }
+
+    /// <summary>
+    /// Creates a copy of the request with a modified body.
+    /// </summary>
+    public HttpRequest WithBody(ReadOnlySequence<byte> newBody)
+    {
+        return new HttpRequest
+        {
+            Method = Method,
+            RawMethod = RawMethod,
+            Uri = Uri,
+            Version = Version,
+            Headers = Headers,
+            HeaderLines = HeaderLines,
+            Body = newBody,
+            Host = Host,
+            UserAgent = UserAgent,
+            ContentType = ContentType,
+            ContentLength = ContentLength
+        };
+    }
 }

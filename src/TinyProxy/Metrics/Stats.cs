@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using System.Threading;
 
 namespace TinyProxy.Metrics;
 
@@ -41,6 +41,16 @@ public sealed class Stats
     /// Gets the total bytes received from clients.
     /// </summary>
     public long BytesReceived => Interlocked.Read(ref _totalBytesReceived);
+
+    /// <summary>
+    /// Alias for BytesSent for compatibility.
+    /// </summary>
+    public long TotalBytesSent => BytesSent;
+
+    /// <summary>
+    /// Alias for BytesReceived for compatibility.
+    /// </summary>
+    public long TotalBytesReceived => BytesReceived;
 
     /// <summary>
     /// Gets the number of failed requests.
@@ -141,21 +151,6 @@ public sealed class Stats
             FailedRequests,
             DeniedRequests,
             RefusedConnections);
-    }
-
-    /// <summary>
-    /// Resets all statistics.
-    /// </summary>
-    public void Reset()
-    {
-        Interlocked.Exchange(ref _totalConnections, 0);
-        Interlocked.Exchange(ref _activeConnections, 0);
-        Interlocked.Exchange(ref _totalRequests, 0);
-        Interlocked.Exchange(ref _totalBytesSent, 0);
-        Interlocked.Exchange(ref _totalBytesReceived, 0);
-        Interlocked.Exchange(ref _failedRequests, 0);
-        Interlocked.Exchange(ref _deniedRequests, 0);
-        Interlocked.Exchange(ref _refusedConnections, 0);
     }
 }
 

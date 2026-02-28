@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace TinyProxy.Config;
@@ -16,20 +19,20 @@ public sealed partial class ConfigParser
         var allowIPs = new HashSet<string>();
         var denyIPs = new HashSet<string>();
         var filterPatterns = new List<string>();
-        var allowedConnectPorts = new HashSet<ushort> { 443 };
+        var allowedConnectPorts = new HashSet<ushort>();
         var anonymousAllowedHeaders = new HashSet<string>();
         var basicAuthUsers = new List<BasicAuthUser>();
+        BasicAuthConfig? primaryBasicAuth = null;
         var reversePaths = new List<ReversePathConfig>();
+        var customErrorPages = new Dictionary<int, string>();
+        var customHeaders = new List<HttpHeader>();
 
         foreach (var line in content.Split('\n'))
         {
             var trimmed = line.Trim();
 
             // Skip empty lines and comments
-            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#'))
-            {
-                continue;
-            }
+            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#')) continue;
 
             var match = s_directiveRegex.Match(trimmed);
             if (!match.Success) continue;
@@ -49,38 +52,23 @@ public sealed partial class ConfigParser
                     break;
 
                 case "port":
-                    if (ushort.TryParse(value, out var p))
-                    {
-                        config = config with { ListenPort = p };
-                    }
+                    if (ushort.TryParse(value, out var p)) config = config with { ListenPort = p };
                     break;
 
                 case "maxclients":
-                    if (int.TryParse(value, out var mc))
-                    {
-                        config = config with { MaxClients = mc };
-                    }
+                    if (int.TryParse(value, out var mc)) config = config with { MaxClients = mc };
                     break;
 
                 case "maxclientsperip":
-                    if (int.TryParse(value, out var mcip))
-                    {
-                        config = config with { MaxClientsPerIp = mcip };
-                    }
+                    if (int.TryParse(value, out var mcip)) config = config with { MaxClientsPerIp = mcip };
                     break;
 
                 case "timeout":
-                    if (int.TryParse(value, out var t))
-                    {
-                        config = config with { Timeout = TimeSpan.FromSeconds(t) };
-                    }
+                    if (int.TryParse(value, out var t)) config = config with { Timeout = TimeSpan.FromSeconds(t) };
                     break;
 
                 case "connecttimeout":
-                    if (int.TryParse(value, out var ct))
-                    {
-                        config = config with { ConnectIdleTimeout = TimeSpan.FromSeconds(ct) };
-                    }
+                    if (int.TryParse(value, out var ct)) config = config with { ConnectIdleTimeout = TimeSpan.FromSeconds(ct) };
                     break;
 
                 case "allow":
@@ -92,29 +80,52 @@ public sealed partial class ConfigParser
                     break;
 
                 case "filterurl":
+                    // Compatibility: legacy singular form used as an inline pattern in this project.
+                    // tinyproxy C uses "FilterURLs" (plural) as a boolean directive.
+                    if (TryParseTinyProxyBoolean(value, out var filterUrlsLegacy))
+                        config = config with { FilterUrls = filterUrlsLegacy };
+                    else
+                        filterPatterns.Add(value);
+                    break;
+
+                case "filterurls":
+                    if (TryParseTinyProxyBoolean(value, out var filterUrls)) config = config with { FilterUrls = filterUrls };
+                    break;
+
                 case "filter":
-                    filterPatterns.Add(value);
+                    // Can be either inline pattern or file path
+                    if (File.Exists(value))
+                    {
+                        config = config with { FilterFile = value };
+                        // Load patterns from file
+                        var filePatterns = LoadFilterFile(value);
+                        filterPatterns.AddRange(filePatterns);
+                    }
+                    else
+                    {
+                        filterPatterns.Add(value);
+                    }
+
                     break;
 
                 case "filterdefaultdeny":
-                    if (bool.TryParse(value, out var fdd))
-                    {
-                        config = config with { FilterDefaultDeny = fdd };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var fdd)) config = config with { FilterDefaultDeny = fdd };
                     break;
 
                 case "filtercasesensitive":
-                    if (bool.TryParse(value, out var fcs))
-                    {
-                        config = config with { FilterCaseSensitive = fcs };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var fcs)) config = config with { FilterCaseSensitive = fcs };
+                    break;
+
+                case "filtertype":
+                    if (value.Equals("fnmatch", StringComparison.OrdinalIgnoreCase))
+                        config = config with { FilterUseGlob = true };
+                    else if (value.Equals("bre", StringComparison.OrdinalIgnoreCase) ||
+                             value.Equals("ere", StringComparison.OrdinalIgnoreCase))
+                        config = config with { FilterUseGlob = false };
                     break;
 
                 case "connectport":
-                    if (ushort.TryParse(value, out var cp))
-                    {
-                        allowedConnectPorts.Add(cp);
-                    }
+                    if (ushort.TryParse(value, out var cp)) allowedConnectPorts.Add(cp);
                     break;
 
                 case "logfile":
@@ -122,17 +133,19 @@ public sealed partial class ConfigParser
                     break;
 
                 case "syslog":
-                    if (bool.TryParse(value, out var syslog))
-                    {
-                        config = config with { UseSyslog = syslog };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var syslog)) config = config with { UseSyslog = syslog };
+                    break;
+
+                case "syslogserver":
+                    config = config with { SyslogServer = value };
+                    break;
+
+                case "syslogport":
+                    if (int.TryParse(value, out var syslogPort)) config = config with { SyslogPort = syslogPort };
                     break;
 
                 case "viaheader":
-                    if (bool.TryParse(value, out var via))
-                    {
-                        config = config with { AddViaHeader = via };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var via)) config = config with { AddViaHeader = via };
                     break;
 
                 case "viaproxyname":
@@ -140,17 +153,11 @@ public sealed partial class ConfigParser
                     break;
 
                 case "xtinyproxy":
-                    if (bool.TryParse(value, out var xtinyproxy))
-                    {
-                        config = config with { AddXTinyproxyHeader = xtinyproxy };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var xtinyproxy)) config = config with { AddXTinyproxyHeader = xtinyproxy };
                     break;
 
                 case "verbose":
-                    if (bool.TryParse(value, out var verbose))
-                    {
-                        config = config with { Verbose = verbose };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var verbose)) config = config with { Verbose = verbose };
                     break;
 
                 case "anonymous":
@@ -166,10 +173,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "bindsame":
-                    if (bool.TryParse(value, out var bs))
-                    {
-                        config = config with { BindSame = bs };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var bs)) config = config with { BindSame = bs };
                     break;
 
                 case "reverseproxy":
@@ -179,29 +183,54 @@ public sealed partial class ConfigParser
                         reversePaths.Add(new ReversePathConfig { Path = rpPath, Url = rpUrl });
                         config = config with { IsReverseProxyEnabled = true };
                     }
+
                     break;
 
                 case "transparent":
-                    if (bool.TryParse(value, out var tp))
-                    {
-                        config = config with { IsTransparentProxyEnabled = tp };
-                    }
+                    if (TryParseTinyProxyBoolean(value, out var tp)) config = config with { IsTransparentProxyEnabled = tp };
                     break;
 
                 case "basicauth":
                     ParseBasicAuth(value, out var baUser, out var baPass);
                     if (baUser != null && baPass != null)
                     {
-                        config = config with { BasicAuth = new BasicAuthConfig { Username = baUser, Password = baPass } };
+                        basicAuthUsers.Add(new BasicAuthUser { Username = baUser, Password = baPass });
+                        if (primaryBasicAuth == null)
+                            primaryBasicAuth = new BasicAuthConfig { Username = baUser, Password = baPass };
                     }
                     break;
 
                 case "upstream":
                     ParseUpstream(value, out var usHost, out var usPort, out var usType);
-                    if (usHost != null && usPort > 0)
+                    if (usHost != null && usPort > 0) config = config with { UpstreamProxy = new UpstreamProxyConfig { Host = usHost, Port = usPort, Type = usType } };
+                    break;
+
+                case "errorfile":
+                    // Format: ErrorFile <status-code> <file-path>
+                    var parts = value.Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 2 && int.TryParse(parts[0], out var code))
                     {
-                        config = config with { UpstreamProxy = new UpstreamProxyConfig { Host = usHost, Port = usPort, Type = usType } };
+                        customErrorPages[code] = parts[1];
+                        config = config with { CustomErrorPages = new Dictionary<int, string>(customErrorPages) };
                     }
+
+                    break;
+
+                case "errorpagesdirectory":
+                    config = config with { ErrorPagesDirectory = value };
+                    break;
+
+                case "addheader":
+                    // Format: AddHeader "Header-Name: Header-Value"
+                    var colonIndex = value.IndexOf(':');
+                    if (colonIndex > 0)
+                    {
+                        var name = value.Substring(0, colonIndex).Trim();
+                        var headerValue = value.Substring(colonIndex + 1).Trim();
+                        customHeaders.Add(new HttpHeader { Name = name, Value = headerValue });
+                        config = config with { CustomHeaders = new List<HttpHeader>(customHeaders) };
+                    }
+
                     break;
             }
         }
@@ -214,8 +243,11 @@ public sealed partial class ConfigParser
             FilterPatterns = filterPatterns,
             AllowedConnectPorts = allowedConnectPorts,
             AnonymousAllowedHeaders = anonymousAllowedHeaders,
+            BasicAuth = primaryBasicAuth,
             BasicAuthUsers = basicAuthUsers,
-            ReversePaths = reversePaths
+            ReversePaths = reversePaths,
+            CustomErrorPages = customErrorPages,
+            CustomHeaders = customHeaders
         };
 
         return config;
@@ -230,10 +262,7 @@ public sealed partial class ConfigParser
         if (colonIndex >= 0)
         {
             address = value.Substring(0, colonIndex);
-            if (ushort.TryParse(value.Substring(colonIndex + 1), out var p))
-            {
-                port = p;
-            }
+            if (ushort.TryParse(value.Substring(colonIndex + 1), out var p)) port = p;
         }
         else
         {
@@ -259,11 +288,22 @@ public sealed partial class ConfigParser
         username = null;
         password = null;
 
-        var colonIndex = value.IndexOf(':');
-        if (colonIndex > 0)
+        var tokens = TokenizeArguments(value);
+
+        if (tokens.Count >= 2)
         {
-            username = value.Substring(0, colonIndex);
-            password = value.Substring(colonIndex + 1);
+            username = tokens[0];
+            password = tokens[1];
+            return;
+        }
+
+        if (tokens.Count == 1)
+        {
+            var colonIndex = tokens[0].IndexOf(':');
+            if (colonIndex <= 0) return;
+
+            username = tokens[0].Substring(0, colonIndex);
+            password = tokens[0].Substring(colonIndex + 1);
         }
     }
 
@@ -295,10 +335,7 @@ public sealed partial class ConfigParser
         if (colonIndex > 0)
         {
             host = url.Substring(0, colonIndex);
-            if (ushort.TryParse(url.Substring(colonIndex + 1), out var p))
-            {
-                port = p;
-            }
+            if (ushort.TryParse(url.Substring(colonIndex + 1), out var p)) port = p;
         }
     }
 
@@ -306,6 +343,88 @@ public sealed partial class ConfigParser
     {
         var content = File.ReadAllText(path);
         return Parse(content);
+    }
+
+    /// <summary>
+    /// Parses tinyproxy-style booleans.
+    /// Supports yes/no, on/off, true/false, 1/0.
+    /// </summary>
+    private static bool TryParseTinyProxyBoolean(string value, out bool result)
+    {
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "yes":
+            case "on":
+            case "true":
+            case "1":
+                result = true;
+                return true;
+            case "no":
+            case "off":
+            case "false":
+            case "0":
+                result = false;
+                return true;
+            default:
+                return bool.TryParse(value, out result);
+        }
+    }
+
+    /// <summary>
+    /// Loads filter patterns from a file.
+    /// Aligns with tinyproxy C's filter_init() in filter.c.
+    /// </summary>
+    public static List<string> LoadFilterFile(string path)
+    {
+        var patterns = new List<string>();
+
+        try
+        {
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var trimmed = line.Trim();
+
+                // Skip empty lines and comments
+                if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#')) continue;
+
+                patterns.Add(trimmed);
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to load filter file '{path}': {ex.Message}", ex);
+        }
+
+        return patterns;
+    }
+
+    private static List<string> TokenizeArguments(string value)
+    {
+        var result = new List<string>();
+        var span = value.AsSpan();
+        var index = 0;
+
+        while (index < span.Length)
+        {
+            while (index < span.Length && char.IsWhiteSpace(span[index])) index++;
+            if (index >= span.Length) break;
+
+            if (span[index] == '"')
+            {
+                index++;
+                var start = index;
+                while (index < span.Length && span[index] != '"') index++;
+                result.Add(span[start..index].ToString().Trim('"'));
+                if (index < span.Length && span[index] == '"') index++;
+                continue;
+            }
+
+            var tokenStart = index;
+            while (index < span.Length && !char.IsWhiteSpace(span[index])) index++;
+            result.Add(span[tokenStart..index].ToString().Trim('"'));
+        }
+
+        return result;
     }
 
     [GeneratedRegex(@"^\s*#.*$")]

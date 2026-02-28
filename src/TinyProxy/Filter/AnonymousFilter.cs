@@ -1,4 +1,5 @@
-using System.Buffers;
+using System;
+using System.Collections.Generic;
 
 namespace TinyProxy.Filter;
 
@@ -28,65 +29,11 @@ public sealed class AnonymousFilter
     }
 
     /// <summary>
-    /// Adds a header to the allowed list.
-    /// Aligns with tinyproxy C's anonymous_insert().
-    /// </summary>
-    public void AllowHeader(string headerName)
-    {
-        _allowedHeaders.Add(headerName);
-    }
-
-    /// <summary>
     /// Checks if a header is allowed to pass through.
     /// Aligns with tinyproxy C's anonymous_search().
     /// </summary>
     public bool IsHeaderAllowed(string headerName)
     {
         return _allowedHeaders.Contains(headerName);
-    }
-
-    /// <summary>
-    /// Checks if anonymous filtering is enabled (has any allowed headers configured).
-    /// Aligns with tinyproxy C's is_anonymous_enabled().
-    /// </summary>
-    public bool IsEnabled => _allowedHeaders.Count > 0;
-
-    /// <summary>
-    /// Filters headers, returning only those that are allowed.
-    /// </summary>
-    public IEnumerable<KeyValuePair<string, ReadOnlySequence<byte>>> FilterHeaders(
-        IDictionary<string, ReadOnlySequence<byte>> headers)
-    {
-        if (!IsEnabled)
-        {
-            return headers;
-        }
-
-        return headers.Where(h => _allowedHeaders.Contains(h.Key));
-    }
-
-    /// <summary>
-    /// Gets the default headers that are safe to pass through in anonymous mode.
-    /// These are headers required for the proxy to function correctly.
-    /// </summary>
-    public static HashSet<string> GetDefaultAllowedHeaders()
-    {
-        return new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "Host",
-            "Content-Type",
-            "Content-Length",
-            "Accept",
-            "Accept-Encoding",
-            "Accept-Language",
-            "Cookie",
-            "Authorization",
-            "Range",
-            "If-Range",
-            "If-Modified-Since",
-            "If-None-Match",
-            "If-Unmodified-Since",
-            "Cache-Control"
-        };
     }
 }

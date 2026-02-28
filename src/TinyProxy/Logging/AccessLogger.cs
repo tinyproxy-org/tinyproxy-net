@@ -1,5 +1,5 @@
-using System.Diagnostics;
-using System.Text;
+using System;
+using System.IO;
 using TinyProxy.Config;
 using TinyProxy.Core;
 
@@ -34,16 +34,12 @@ public sealed class AccessLogger : IDisposable
     private void InitializeWriter()
     {
         if (!string.IsNullOrEmpty(_config.LogFile))
-        {
             try
             {
                 var directory = Path.GetDirectoryName(_config.LogFile);
-                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
+                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory)) Directory.CreateDirectory(directory);
 
-                _writer = new StreamWriter(_config.LogFile, append: true)
+                _writer = new StreamWriter(_config.LogFile, true)
                 {
                     AutoFlush = true
                 };
@@ -52,7 +48,6 @@ public sealed class AccessLogger : IDisposable
             {
                 _logger.LogError($"Failed to initialize log file '{_config.LogFile}': {ex.Message}");
             }
-        }
     }
 
     /// <summary>
@@ -73,7 +68,6 @@ public sealed class AccessLogger : IDisposable
         lock (_lock)
         {
             if (_writer != null)
-            {
                 try
                 {
                     _writer.WriteLine(logEntry);
@@ -82,16 +76,13 @@ public sealed class AccessLogger : IDisposable
                 {
                     _logger.LogError($"Failed to write to log file: {ex.Message}");
                 }
-            }
             else
-            {
                 // Write directly to stdout without prefix (like tinyproxy C)
                 // Use shared lock to prevent interleaving with ConsoleLogger output
                 lock (ConsoleLock.Lock)
                 {
                     Console.WriteLine(logEntry);
                 }
-            }
         }
     }
 
@@ -118,30 +109,22 @@ public sealed class AccessLogger : IDisposable
     /// <summary>
     /// Sanitizes a value for logging to prevent log injection attacks.
     /// Removes newlines, carriage returns, and other control characters.
+    /// Uses StringBuilderCache for reduced allocations.
     /// </summary>
     private static string SanitizeLogValue(string value)
     {
-        if (string.IsNullOrEmpty(value))
-        {
-            return "-";
-        }
+        if (string.IsNullOrEmpty(value)) return "-";
 
-        var sb = new StringBuilder(value.Length);
+        var sb = StringBuilderCache.Acquire(value.Length);
 
         foreach (var c in value)
-        {
             // Allow printable ASCII and common Unicode printable characters
             // Skip control characters and newlines
             if (c == '\r' || c == '\n' || c == '\t' || char.IsControl(c))
-            {
                 sb.Append(' ');
-            }
             else
-            {
                 sb.Append(c);
-            }
-        }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 }

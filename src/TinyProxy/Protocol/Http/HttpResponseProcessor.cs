@@ -1,10 +1,14 @@
+using System;
 using System.Buffers;
+using System.Collections.Generic;
+using System.IO;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
 using TinyProxy.Core;
 using TinyProxy.Filter;
-using TinyProxy.Logging;
 
 namespace TinyProxy.Protocol.Http;
 
@@ -70,10 +74,7 @@ public sealed class HttpResponseProcessor
                 SocketFlags.None,
                 token).ConfigureAwait(false);
 
-            if (read == 0)
-            {
-                throw new InvalidOperationException("Connection closed while reading status line");
-            }
+            if (read == 0) throw new InvalidOperationException("Connection closed while reading status line");
 
             // Check for LF (line end)
             if (buffer[position] == (byte)'\n')
@@ -82,10 +83,7 @@ public sealed class HttpResponseProcessor
                 var statusLine = Encoding.ASCII.GetString(buffer, 0, position);
                 var parts = statusLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
-                if (parts.Length >= 2 && int.TryParse(parts[1], out var code))
-                {
-                    return (position + 1, code);
-                }
+                if (parts.Length >= 2 && int.TryParse(parts[1], out var code)) return (position + 1, code);
 
                 throw new InvalidOperationException($"Invalid status line: {statusLine}");
             }
@@ -117,10 +115,7 @@ public sealed class HttpResponseProcessor
                 SocketFlags.None,
                 token).ConfigureAwait(false);
 
-            if (read == 0)
-            {
-                throw new InvalidOperationException("Connection closed while reading headers");
-            }
+            if (read == 0) throw new InvalidOperationException("Connection closed while reading headers");
 
             position++;
             totalBytes++;
@@ -129,10 +124,7 @@ public sealed class HttpResponseProcessor
             if (position >= 2 && buffer[position - 2] == (byte)'\r' && buffer[position - 1] == (byte)'\n')
             {
                 // Check for empty line (end of headers)
-                if (position - lineStart <= 2)
-                {
-                    return totalBytes;
-                }
+                if (position - lineStart <= 2) return totalBytes;
 
                 // Parse header line: Name: Value\r\n
                 var headerLine = Encoding.ASCII.GetString(buffer, lineStart, position - lineStart - 2);
@@ -165,9 +157,6 @@ public sealed class HttpResponseProcessor
         using var ms = new MemoryStream();
         var writer = new StreamWriter(ms, Encoding.ASCII, leaveOpen: true);
 
-        // Get hop-by-hop headers to remove
-        var hopByHopHeaders = HeaderFilter.GetHopByHopHeaders();
-
         // Apply anonymous filter if enabled
         var anonymousFilter = new AnonymousFilter(_config.AnonymousAllowedHeaders);
 
@@ -176,22 +165,13 @@ public sealed class HttpResponseProcessor
             var name = header.Key;
 
             // Skip hop-by-hop headers (aligns with tinyproxy C's remove_connection_headers)
-            if (hopByHopHeaders.Contains(name))
-            {
-                continue;
-            }
+            if (ProxyConstants.HopByHopHeadersSet.Contains(name)) continue;
 
             // Apply anonymous filtering
-            if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(name))
-            {
-                continue;
-            }
+            if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(name)) continue;
 
             // Skip Via header (we'll add it back properly)
-            if (name.Equals("Via", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
+            if (name.Equals("Via", StringComparison.OrdinalIgnoreCase)) continue;
 
             // Write header
             writer.Write($"{name}: ");
@@ -205,23 +185,16 @@ public sealed class HttpResponseProcessor
         if (_config.AddViaHeader)
         {
             string? existingVia = null;
-            if (headers.TryGetValue("Via", out var viaValue))
-            {
-                existingVia = Encoding.ASCII.GetString(viaValue.ToArray()).Trim();
-            }
+            if (headers.TryGetValue("Via", out var viaValue)) existingVia = Encoding.ASCII.GetString(viaValue.ToArray()).Trim();
 
             var hostname = _config.ViaProxyName ?? System.Net.Dns.GetHostName();
             var viaProxyName = string.IsNullOrEmpty(hostname) ? "unknown" : hostname;
 
             string viaHeader;
             if (!string.IsNullOrEmpty(existingVia))
-            {
                 viaHeader = $"Via: {existingVia}, 1.1 {viaProxyName} (tinyproxy-net)\r\n";
-            }
             else
-            {
                 viaHeader = $"Via: 1.1 {viaProxyName} (tinyproxy-net)\r\n";
-            }
 
             writer.Write(viaHeader);
         }

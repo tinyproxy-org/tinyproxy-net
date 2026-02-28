@@ -1,8 +1,14 @@
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
+using TinyProxy.Core;
 
 namespace TinyProxy.Filter;
 
@@ -17,7 +23,6 @@ public sealed class AccessControl
     private readonly List<AccessRule> _denyRules;
     private readonly ConcurrentDictionary<string, string> _dnsCache;
     private readonly ConcurrentDictionary<string, IPAddress> _dnsForwardCache;
-    private const int MaxCacheSize = 1000;
 
     public AccessControl(Configuration config)
     {
@@ -35,16 +40,10 @@ public sealed class AccessControl
     public bool IsAllowed(string clientIp)
     {
         // If allow rules have entries, only allow IPs that match allow rules
-        if (_allowRules.Count > 0)
-        {
-            return CheckRules(clientIp, _allowRules, _dnsForwardCache);
-        }
+        if (_allowRules.Count > 0) return CheckRules(clientIp, _allowRules, _dnsForwardCache);
 
         // If deny rules have entries, deny IPs that match deny rules
-        if (_denyRules.Count > 0)
-        {
-            return !CheckRules(clientIp, _denyRules, _dnsForwardCache);
-        }
+        if (_denyRules.Count > 0) return !CheckRules(clientIp, _denyRules, _dnsForwardCache);
 
         // No filtering configured, allow all
         return true;
@@ -55,10 +54,7 @@ public sealed class AccessControl
     /// </summary>
     public bool IsAllowed(EndPoint endPoint)
     {
-        if (endPoint is IPEndPoint ipEndPoint)
-        {
-            return IsAllowed(ipEndPoint.Address.ToString());
-        }
+        if (endPoint is IPEndPoint ipEndPoint) return IsAllowed(ipEndPoint.Address.ToString());
 
         // Allow non-IP endpoints (e.g., Unix domain sockets)
         return true;
@@ -72,22 +68,16 @@ public sealed class AccessControl
     public async Task<bool> IsAllowedAsync(string hostname, CancellationToken cancellationToken = default)
     {
         // First, check direct IP pattern match
-        if (IPAddress.TryParse(hostname, out var ipAddress))
-        {
-            return IsAllowed(ipAddress.ToString());
-        }
+        if (IPAddress.TryParse(hostname, out var ipAddress)) return IsAllowed(ipAddress.ToString());
 
         // Try to resolve hostname to IP and check
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken).ConfigureAwait(false);
             foreach (var address in addresses)
-            {
                 if (!IsAllowed(address.ToString()))
-                {
                     return false;
-                }
-            }
+
             return true;
         }
         catch (HttpRequestException)
@@ -109,10 +99,7 @@ public sealed class AccessControl
     /// </summary>
     public async Task<bool> IsAllowedAsync(Socket socket, CancellationToken cancellationToken = default)
     {
-        if (socket.RemoteEndPoint is IPEndPoint ipEndPoint)
-        {
-            return await IsAllowedAsync(ipEndPoint.Address, ipEndPoint, cancellationToken);
-        }
+        if (socket.RemoteEndPoint is IPEndPoint ipEndPoint) return await IsAllowedAsync(ipEndPoint.Address, ipEndPoint, cancellationToken);
 
         return true;
     }
@@ -128,25 +115,20 @@ public sealed class AccessControl
         // Check numeric rules first (fast path)
         if (_allowRules.Count > 0)
         {
-            if (HasNumericMatch(ipString, _allowRules))
-            {
-                return true;
-            }
+            if (HasNumericMatch(ipString, _allowRules)) return true;
             // Check if allow rules require DNS lookup
             if (_allowRules.Any(r => r.Type == RuleType.Domain))
             {
                 var hostname = await GetHostnameAsync(endPoint, cancellationToken);
                 return CheckDomainMatch(hostname, _allowRules);
             }
+
             return false;
         }
 
         if (_denyRules.Count > 0)
         {
-            if (HasNumericMatch(ipString, _denyRules))
-            {
-                return false;
-            }
+            if (HasNumericMatch(ipString, _denyRules)) return false;
             // Check if deny rules require DNS lookup
             if (_denyRules.Any(r => r.Type == RuleType.Domain))
             {
@@ -170,11 +152,9 @@ public sealed class AccessControl
                 continue;
 
             var rule = ParseRule(pattern, accessType);
-            if (rule != null)
-            {
-                rules.Add(rule);
-            }
+            if (rule != null) rules.Add(rule);
         }
+
         return rules;
     }
 
@@ -187,16 +167,10 @@ public sealed class AccessControl
         pattern = pattern.Trim();
 
         // Check for domain suffix (starts with '.')
-        if (pattern.StartsWith('.'))
-        {
-            return new AccessRule(RuleType.Domain, pattern.Substring(1), accessType);
-        }
+        if (pattern.StartsWith('.')) return new AccessRule(RuleType.Domain, pattern.Substring(1), accessType);
 
         // Check for wildcard pattern
-        if (pattern.Contains('*'))
-        {
-            return new AccessRule(RuleType.Wildcard, pattern, accessType);
-        }
+        if (pattern.Contains('*')) return new AccessRule(RuleType.Wildcard, pattern, accessType);
 
         // Check for CIDR notation
         var slashIndex = pattern.IndexOf('/');
@@ -205,16 +179,11 @@ public sealed class AccessControl
             var ipPart = pattern.Substring(0, slashIndex);
             var prefixLength = pattern.Substring(slashIndex + 1);
             if (IPAddress.TryParse(ipPart, out var ipAddress) && int.TryParse(prefixLength, out var prefixLen))
-            {
                 return new AccessRule(RuleType.Cidr, pattern, accessType, ipAddress, prefixLen);
-            }
         }
 
         // Try as plain IP address
-        if (IPAddress.TryParse(pattern, out var ip))
-        {
-            return new AccessRule(RuleType.Ip, pattern, accessType, ip);
-        }
+        if (IPAddress.TryParse(pattern, out var ip)) return new AccessRule(RuleType.Ip, pattern, accessType, ip);
 
         // Treat as domain name
         return new AccessRule(RuleType.Domain, pattern, accessType);
@@ -227,7 +196,6 @@ public sealed class AccessControl
     private static bool CheckRules(string ip, List<AccessRule> rules, ConcurrentDictionary<string, IPAddress> dnsCache)
     {
         foreach (var rule in rules)
-        {
             switch (rule.Type)
             {
                 case RuleType.Ip:
@@ -237,10 +205,8 @@ public sealed class AccessControl
 
                 case RuleType.Cidr:
                     if (rule.IPAddress != null && IPAddress.TryParse(ip, out var ipAddr))
-                    {
                         if (IsInSubnet(ipAddr, rule.IPAddress, rule.PrefixLength))
                             return true;
-                    }
                     break;
 
                 case RuleType.Wildcard:
@@ -252,7 +218,6 @@ public sealed class AccessControl
                     // Domain rules require DNS lookup, handled separately
                     break;
             }
-        }
 
         return false;
     }
@@ -263,7 +228,6 @@ public sealed class AccessControl
     private static bool HasNumericMatch(string ip, List<AccessRule> rules)
     {
         foreach (var rule in rules)
-        {
             switch (rule.Type)
             {
                 case RuleType.Ip:
@@ -273,10 +237,8 @@ public sealed class AccessControl
 
                 case RuleType.Cidr:
                     if (rule.IPAddress != null && IPAddress.TryParse(ip, out var ipAddr))
-                    {
                         if (IsInSubnet(ipAddr, rule.IPAddress, rule.PrefixLength))
                             return true;
-                    }
                     break;
 
                 case RuleType.Wildcard:
@@ -284,7 +246,6 @@ public sealed class AccessControl
                         return true;
                     break;
             }
-        }
 
         return false;
     }
@@ -295,27 +256,18 @@ public sealed class AccessControl
     private static bool CheckDomainMatch(string hostname, List<AccessRule> rules)
     {
         foreach (var rule in rules)
-        {
             if (rule.Type == RuleType.Domain)
             {
                 // Check suffix match
                 if (hostname.EndsWith(rule.Pattern, StringComparison.OrdinalIgnoreCase))
-                {
                     // Ensure it's a whole domain boundary (either matches exactly or has a dot before)
                     if (hostname.Length == rule.Pattern.Length ||
                         hostname[hostname.Length - rule.Pattern.Length - 1] == '.')
-                    {
                         return true;
-                    }
-                }
 
                 // Check exact match
-                if (string.Equals(hostname, rule.Pattern, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
+                if (string.Equals(hostname, rule.Pattern, StringComparison.OrdinalIgnoreCase)) return true;
             }
-        }
 
         return false;
     }
@@ -324,15 +276,11 @@ public sealed class AccessControl
     /// Performs reverse DNS lookup with caching.
     /// Aligns with tinyproxy C's getnameinfo call in acl_string_processing.
     /// </summary>
-
     private async Task<string> GetHostnameAsync(IPEndPoint endPoint, CancellationToken cancellationToken)
     {
         var cacheKey = endPoint.Address.ToString();
 
-        if (_dnsCache.TryGetValue(cacheKey, out var cachedHostname))
-        {
-            return cachedHostname;
-        }
+        if (_dnsCache.TryGetValue(cacheKey, out var cachedHostname)) return cachedHostname;
 
         try
         {
@@ -340,14 +288,11 @@ public sealed class AccessControl
             var hostname = hostEntry.HostName;
 
             // Cache with LRU eviction
-            if (_dnsCache.Count >= MaxCacheSize)
+            if (_dnsCache.Count >= ProxyConstants.MaxDnsCacheSize)
             {
                 // Remove some entries to keep cache size under control
                 var keysToRemove = _dnsCache.Keys.Take(100).ToList();
-                foreach (var key in keysToRemove)
-                {
-                    _dnsCache.TryRemove(key, out _);
-                }
+                foreach (var key in keysToRemove) _dnsCache.TryRemove(key, out _);
             }
 
             _dnsCache.TryAdd(cacheKey, hostname);
@@ -374,18 +319,16 @@ public sealed class AccessControl
         if (ipBytes.Length != subnetBytes.Length)
             return false;
 
-        int fullBytes = prefixLength / 8;
-        int partialBits = prefixLength % 8;
+        var fullBytes = prefixLength / 8;
+        var partialBits = prefixLength % 8;
 
-        for (int i = 0; i < fullBytes; i++)
-        {
+        for (var i = 0; i < fullBytes; i++)
             if (ipBytes[i] != subnetBytes[i])
                 return false;
-        }
 
         if (partialBits > 0 && fullBytes < ipBytes.Length)
         {
-            byte mask = (byte)(0xFF << (8 - partialBits));
+            var mask = (byte)(0xFF << (8 - partialBits));
             if ((ipBytes[fullBytes] & mask) != (subnetBytes[fullBytes] & mask))
                 return false;
         }
@@ -404,22 +347,11 @@ public sealed class AccessControl
         if (patternParts.Length != ipParts.Length)
             return false;
 
-        for (int i = 0; i < patternParts.Length; i++)
-        {
+        for (var i = 0; i < patternParts.Length; i++)
             if (patternParts[i] != "*" && patternParts[i] != ipParts[i])
                 return false;
-        }
 
         return true;
-    }
-
-    /// <summary>
-    /// Clears DNS caches.
-    /// </summary>
-    public void ClearCache()
-    {
-        _dnsCache.Clear();
-        _dnsForwardCache.Clear();
     }
 }
 

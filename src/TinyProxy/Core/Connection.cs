@@ -1,6 +1,9 @@
+using System;
 using System.Buffers;
-using System.IO.Pipelines;
+using System.Collections.Generic;
 using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
 using TinyProxy.Filter;
 using TinyProxy.Logging;
@@ -25,6 +28,7 @@ public sealed class Connection : IDisposable
     private readonly AccessControl _accessControl;
     private readonly BasicAuth _basicAuth;
     private readonly UrlFilter _urlFilter;
+    private readonly LoopDetector _loopDetector;
     private bool _disposed;
 
     public Socket ClientSocket => _clientSocket;
@@ -36,13 +40,15 @@ public sealed class Connection : IDisposable
         ILogger logger,
         Configuration config,
         Stats stats,
-        AccessLogger accessLogger)
+        AccessLogger accessLogger,
+        LoopDetector loopDetector)
     {
         _clientSocket = clientSocket ?? throw new ArgumentNullException(nameof(clientSocket));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _stats = stats ?? throw new ArgumentNullException(nameof(stats));
         _accessLogger = accessLogger ?? throw new ArgumentNullException(nameof(accessLogger));
+        _loopDetector = loopDetector ?? throw new ArgumentNullException(nameof(loopDetector));
 
         _clientIp = ExtractClientIp();
 
@@ -54,10 +60,7 @@ public sealed class Connection : IDisposable
 
     private string ExtractClientIp()
     {
-        if (_clientSocket.RemoteEndPoint is System.Net.IPEndPoint ip)
-        {
-            return ip.Address.ToString();
-        }
+        if (_clientSocket.RemoteEndPoint is System.Net.IPEndPoint ip) return ip.Address.ToString();
         return "unknown";
     }
 
@@ -70,15 +73,36 @@ public sealed class Connection : IDisposable
 
         try
         {
-            // Read first request to determine if it's CONNECT
-            var firstRequest = await ReadFirstRequestAsync(token).ConfigureAwait(false);
+            // Aligns with tinyproxy C's loop.c: detect proxy self-loop before reading request.
+            if (_loopDetector.IsLoopDetected(_clientSocket.RemoteEndPoint))
+            {
+                _stats.IncrementFailedRequests();
+                _stats.IncrementDeniedRequests();
+                await Protocol.HtmlErrorPages.BadRequestAsync(
+                    _clientSocket,
+                    "You tried to connect to the machine the proxy is running on",
+                    token);
+                return;
+            }
 
+            // Read first request to determine if it's CONNECT.
+            var (firstRequest, isBadRequest) = await ReadFirstRequestAsync(token).ConfigureAwait(false);
             if (firstRequest == null)
             {
+                if (isBadRequest)
+                {
+                    _stats.IncrementFailedRequests();
+                    await Protocol.HtmlErrorPages.BadRequestAsync(
+                        _clientSocket,
+                        "Request has an invalid format",
+                        token).ConfigureAwait(false);
+                }
+
                 return; // Connection closed or invalid
             }
 
             _stats.IncrementRequests();
+            var isStatPageRequest = IsStatPageRequest(firstRequest);
 
             // Check access control (IP whitelist/blacklist)
             if (!_accessControl.IsAllowed(_clientSocket.RemoteEndPoint!))
@@ -95,17 +119,30 @@ public sealed class Connection : IDisposable
             }
 
             // Check authentication
-            var authHeader = BasicAuth.GetAuthorizationHeader(firstRequest.Headers);
+            var authHeader = GetAuthHeader(firstRequest, isStatPageRequest, out var statHostAuthFlow);
             if (!_basicAuth.Validate(authHeader))
             {
                 _logger.LogWarning($"Authentication failed for {_clientSocket.RemoteEndPoint}");
                 _stats.IncrementFailedRequests();
                 _stats.IncrementDeniedRequests();
-                await Protocol.HtmlErrorPages.ProxyAuthenticationRequiredAsync(
-                    _clientSocket,
-                    _basicAuth.GetRealm(),
-                    token);
-                LogAccess(firstRequest, 407, 0);
+
+                if (statHostAuthFlow)
+                {
+                    await Protocol.HtmlErrorPages.UnauthorizedAsync(
+                        _clientSocket,
+                        _basicAuth.GetRealm(),
+                        token);
+                    LogAccess(firstRequest, 401, 0);
+                }
+                else
+                {
+                    await Protocol.HtmlErrorPages.ProxyAuthenticationRequiredAsync(
+                        _clientSocket,
+                        _basicAuth.GetRealm(),
+                        token);
+                    LogAccess(firstRequest, 407, 0);
+                }
+
                 return;
             }
 
@@ -123,20 +160,14 @@ public sealed class Connection : IDisposable
                 return;
             }
 
-            if (_config.Verbose)
-            {
-                _logger.LogInfo($"{firstRequest.Method} {firstRequest.Uri}");
-            }
+            if (_config.Verbose) _logger.LogInfo($"{firstRequest.Method} {firstRequest.Uri}");
 
             // Check if this is a reverse proxy request
             if (_config.IsReverseProxyEnabled && _config.ReversePaths.Count > 0)
             {
                 var reverseProxy = new Protocol.ReverseProxy(_logger, _config, _stats, _accessLogger, _clientIp);
                 var handled = await reverseProxy.TryHandleAsync(this, firstRequest, token);
-                if (handled)
-                {
-                    return;
-                }
+                if (handled) return;
             }
 
             // Check if this is a transparent proxy request
@@ -162,14 +193,11 @@ public sealed class Connection : IDisposable
                 var newUri = transparentProxy.BuildAbsoluteUri(firstRequest.Uri, dest.Value.host, dest.Value.port, firstRequest.Uri);
                 firstRequest = firstRequest.WithUri(newUri);
 
-                if (_config.Verbose)
-                {
-                    _logger.LogInfo($"Transparent proxy resolved to: {firstRequest.Uri}");
-                }
+                if (_config.Verbose) _logger.LogInfo($"Transparent proxy resolved to: {firstRequest.Uri}");
             }
 
             // Check if this is a statistics page request
-            if (!string.IsNullOrEmpty(_config.StatHost) && IsStatPageRequest(firstRequest))
+            if (!string.IsNullOrEmpty(_config.StatHost) && isStatPageRequest)
             {
                 var statsHandler = new Protocol.StatsHandler(_logger, _config, _stats);
                 await statsHandler.HandleStatsPageAsync(_clientSocket, token);
@@ -181,13 +209,13 @@ public sealed class Connection : IDisposable
             if (firstRequest.Method == Protocol.Http.HttpMethod.Connect)
             {
                 // Handle CONNECT - use remaining data for tunnel
-                var connectHandler = new Protocol.ConnectHandler(_logger, _config, _stats, _accessLogger, _clientIp);
+                var connectHandler = new Protocol.ConnectHandler(_logger, _config, _stats, _accessLogger, _clientIp, _loopDetector);
                 await connectHandler.HandleConnectAsync(this, firstRequest, firstRequest.Body, token);
             }
             else
             {
                 // Handle regular HTTP request
-                var forwarder = new HttpForwarder(_logger, _config, _stats, _accessLogger, _clientIp);
+                var forwarder = new HttpForwarder(_logger, _config, _stats, _accessLogger, _clientIp, _loopDetector);
                 await forwarder.ForwardAsync(this, firstRequest, token);
             }
         }
@@ -205,13 +233,14 @@ public sealed class Connection : IDisposable
     /// Reads the first HTTP request from the socket.
     /// Supports dynamic buffer growth for large headers.
     /// </summary>
-    private async Task<HttpRequest?> ReadFirstRequestAsync(CancellationToken token)
+    private async Task<(HttpRequest? request, bool badRequest)> ReadFirstRequestAsync(CancellationToken token)
     {
-        const int InitialBufferSize = 8192;
-        const int MaxHeaderSize = 65536; // 64KB max for headers
+        const int InitialBufferSize = ProxyConstants.InitialHeaderBufferSize;
+        const int MaxHeaderSize = ProxyConstants.MaxHeaderSize;
 
         var buffer = ArrayPool<byte>.Shared.Rent(InitialBufferSize);
         var totalReceived = 0;
+        var parser = new HttpRequestParser(_logger);
 
         try
         {
@@ -222,10 +251,7 @@ public sealed class Connection : IDisposable
                     SocketFlags.None,
                     token).ConfigureAwait(false);
 
-                if (received == 0)
-                {
-                    return null; // Connection closed
-                }
+                if (received == 0) return (null, false); // Connection closed
 
                 totalReceived += received;
 
@@ -234,16 +260,19 @@ public sealed class Connection : IDisposable
                 if (headerEnd >= 0)
                 {
                     // Full headers received, parse the request
-                    var parser = new HttpRequestParser(_logger);
                     var sequence = new ReadOnlySequence<byte>(buffer.AsMemory(0, totalReceived));
 
                     if (!parser.TryParseRequest(ref sequence, out var request))
                     {
                         _logger.LogWarning("Failed to parse request");
-                        return null;
+                        return (null, true);
                     }
 
-                    return request;
+                    if (request == null) return (null, true);
+
+                    // The receive buffer is returned to ArrayPool in finally.
+                    // Detach any pre-read body bytes to avoid use-after-return.
+                    return (CloneBodyIfNeeded(request), false);
                 }
 
                 // Need more data - grow buffer if needed
@@ -253,7 +282,7 @@ public sealed class Connection : IDisposable
                     if (newBufferSize <= buffer.Length)
                     {
                         _logger.LogWarning("Request headers too large");
-                        return null;
+                        return (null, true);
                     }
 
                     var newBuffer = ArrayPool<byte>.Shared.Rent(newBufferSize);
@@ -264,12 +293,20 @@ public sealed class Connection : IDisposable
             }
 
             _logger.LogWarning("Request headers exceeded maximum size");
-            return null;
+            return (null, true);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+    }
+
+    private static HttpRequest CloneBodyIfNeeded(HttpRequest request)
+    {
+        if (request.Body.Length == 0) return request;
+
+        var bodyCopy = request.Body.ToArray();
+        return request.WithBody(new ReadOnlySequence<byte>(bodyCopy));
     }
 
     /// <summary>
@@ -278,21 +315,17 @@ public sealed class Connection : IDisposable
     /// </summary>
     private static int FindHeaderEnd(ReadOnlySpan<byte> span)
     {
-        for (int i = 0; i < span.Length - 1; i++)
+        for (var i = 0; i < span.Length - 1; i++)
         {
             // Check for CRLF CRLF (standard)
             if (i < span.Length - 3 &&
                 span[i] == '\r' && span[i + 1] == '\n' &&
                 span[i + 2] == '\r' && span[i + 3] == '\n')
-            {
                 return i + 4;
-            }
             // Check for LF LF (non-standard but allowed by tinyproxy)
-            if (span[i] == '\n' && span[i + 1] == '\n')
-            {
-                return i + 2;
-            }
+            if (span[i] == '\n' && span[i + 1] == '\n') return i + 2;
         }
+
         return -1;
     }
 
@@ -302,37 +335,52 @@ public sealed class Connection : IDisposable
     /// </summary>
     private bool IsStatPageRequest(HttpRequest request)
     {
-        if (string.IsNullOrEmpty(_config.StatHost))
-        {
-            return false;
-        }
+        if (string.IsNullOrEmpty(_config.StatHost)) return false;
 
         // Check if the Host header matches StatHost
         foreach (var kvp in request.Headers)
-        {
             if (string.Equals(kvp.Key, "Host", StringComparison.OrdinalIgnoreCase))
             {
-                var hostBytes = kvp.Value.ToArray();
-                var host = System.Text.Encoding.ASCII.GetString(hostBytes);
+                // Use span-based parsing to avoid allocation
+                var hostSpan = kvp.Value.IsSingleSegment ? kvp.Value.FirstSpan : kvp.Value.ToArray();
+                var host = System.Text.Encoding.ASCII.GetString(hostSpan);
 
                 // Exact match or hostname match (without port)
                 if (string.Equals(host, _config.StatHost, StringComparison.OrdinalIgnoreCase) ||
                     host.StartsWith(_config.StatHost + ":", StringComparison.OrdinalIgnoreCase))
-                {
                     return true;
-                }
 
                 break;
             }
-        }
 
         return false;
     }
 
     private void LogAccess(HttpRequest request, int statusCode, long bytesSent)
     {
-        var method = HttpMethodParser.ToHttpString(request.Method);
+        var method = request.GetMethodToken();
         _accessLogger.LogAccess(_clientIp, method, request.Uri, request.Version, statusCode, bytesSent);
+    }
+
+    private static string? GetAuthHeader(HttpRequest request, bool isStatPageRequest, out bool statHostAuthFlow)
+    {
+        statHostAuthFlow = false;
+
+        var proxyAuth = GetHeaderValue(request.Headers, "Proxy-Authorization");
+        if (proxyAuth != null) return proxyAuth;
+
+        if (!isStatPageRequest) return null;
+
+        statHostAuthFlow = true;
+        return GetHeaderValue(request.Headers, "Authorization");
+    }
+
+    private static string? GetHeaderValue(IDictionary<string, ReadOnlySequence<byte>> headers, string headerName)
+    {
+        if (!headers.TryGetValue(headerName, out var value) || value.Length == 0) return null;
+
+        var span = value.IsSingleSegment ? value.FirstSpan : value.ToArray();
+        return System.Text.Encoding.ASCII.GetString(span);
     }
 
     public void Dispose()

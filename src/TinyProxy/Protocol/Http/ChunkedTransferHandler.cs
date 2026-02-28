@@ -1,6 +1,9 @@
+using System;
 using System.Buffers;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Core;
 
 namespace TinyProxy.Protocol.Http;
@@ -80,26 +83,17 @@ public sealed class ChunkedTransferHandler
                 SocketFlags.None,
                 token).ConfigureAwait(false);
 
-            if (read == 0)
-            {
-                throw new InvalidOperationException("Connection closed while reading chunk size");
-            }
+            if (read == 0) throw new InvalidOperationException("Connection closed while reading chunk size");
 
             // Check for LF (line end)
             if (buffer[position] == (byte)'\n')
             {
                 // Check for CR before LF
-                if (position > 0 && buffer[position - 1] == (byte)'\r')
-                {
-                    position--; // Don't include CR in the parse
-                }
+                if (position > 0 && buffer[position - 1] == (byte)'\r') position--; // Don't include CR in the parse
 
                 // Parse hex chunk size
                 var hexLine = Encoding.ASCII.GetString(buffer, 0, position);
-                if (!long.TryParse(hexLine, System.Globalization.NumberStyles.HexNumber, null, out var size))
-                {
-                    throw new InvalidOperationException($"Invalid chunk size: {hexLine}");
-                }
+                if (!long.TryParse(hexLine, System.Globalization.NumberStyles.HexNumber, null, out var size)) throw new InvalidOperationException($"Invalid chunk size: {hexLine}");
 
                 return size;
             }
@@ -120,7 +114,7 @@ public sealed class ChunkedTransferHandler
         long chunkSize,
         CancellationToken token)
     {
-        long bytesRemaining = chunkSize;
+        var bytesRemaining = chunkSize;
         long totalRead = 0;
 
         while (bytesRemaining > 0)
@@ -131,18 +125,14 @@ public sealed class ChunkedTransferHandler
                 SocketFlags.None,
                 token).ConfigureAwait(false);
 
-            if (read == 0)
-            {
-                throw new InvalidOperationException("Connection closed while reading chunk data");
-            }
+            if (read == 0) throw new InvalidOperationException("Connection closed while reading chunk data");
 
             bytesRemaining -= read;
             totalRead += read;
 
             // Forward the data immediately
-            await destination.SendAsync(
+            await destination.SendAllAsync(
                 new Memory<byte>(buffer, 0, read),
-                SocketFlags.None,
                 token).ConfigureAwait(false);
         }
 
@@ -164,17 +154,11 @@ public sealed class ChunkedTransferHandler
                 SocketFlags.None,
                 token).ConfigureAwait(false);
 
-            if (read == 0)
-            {
-                throw new InvalidOperationException("Connection closed while reading CRLF");
-            }
+            if (read == 0) throw new InvalidOperationException("Connection closed while reading CRLF");
 
             totalRead += read;
         }
 
-        if (buffer[0] != (byte)'\r' || buffer[1] != (byte)'\n')
-        {
-            throw new InvalidOperationException("Expected CRLF");
-        }
+        if (buffer[0] != (byte)'\r' || buffer[1] != (byte)'\n') throw new InvalidOperationException("Expected CRLF");
     }
 }

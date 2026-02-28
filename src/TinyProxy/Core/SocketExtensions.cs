@@ -1,6 +1,10 @@
+using System;
 using System.Buffers;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
 
 namespace TinyProxy.Core;
@@ -14,12 +18,12 @@ public static class SocketExtensions
     /// <summary>
     /// Sends all data from buffer to socket.
     /// </summary>
-    public static async ValueTask SendAsync(
+    public static async ValueTask SendAllAsync(
         this Socket socket,
         ReadOnlyMemory<byte> buffer,
         CancellationToken cancellationToken = default)
     {
-        int sent = 0;
+        var sent = 0;
         while (sent < buffer.Length)
         {
             var result = await socket.SendAsync(buffer.Slice(sent), SocketFlags.None, cancellationToken).ConfigureAwait(false);
@@ -29,15 +33,42 @@ public static class SocketExtensions
     }
 
     /// <summary>
-    /// Sends data to socket and returns number of bytes sent.
+    /// Sends all bytes from a sequence to socket.
     /// </summary>
-    public static async ValueTask<int> SendAndReturnAsync(
+    public static async ValueTask SendAllAsync(
         this Socket socket,
-        ReadOnlyMemory<byte> buffer,
+        ReadOnlySequence<byte> buffer,
         CancellationToken cancellationToken = default)
     {
-        var result = await socket.SendAsync(buffer, SocketFlags.None, cancellationToken).ConfigureAwait(false);
-        return result;
+        foreach (var segment in buffer)
+        {
+            if (segment.IsEmpty) continue;
+            await socket.SendAllAsync(segment, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Receives exactly <paramref name="buffer"/> length bytes from socket.
+    /// Throws if connection closes before the buffer is filled.
+    /// </summary>
+    public static async ValueTask ReceiveExactlyAsync(
+        this Socket socket,
+        Memory<byte> buffer,
+        CancellationToken cancellationToken = default)
+    {
+        var received = 0;
+        while (received < buffer.Length)
+        {
+            var read = await socket.ReceiveAsync(
+                buffer.Slice(received),
+                SocketFlags.None,
+                cancellationToken).ConfigureAwait(false);
+
+            if (read == 0)
+                throw new EndOfStreamException("Socket closed before receiving the expected number of bytes.");
+
+            received += read;
+        }
     }
 
     /// <summary>
@@ -94,16 +125,10 @@ public static class SocketExtensions
     public static void BindToSameIp(this Socket serverSocket, Socket clientSocket, Configuration config)
     {
         // Only bind if BindSame is enabled
-        if (!config.BindSame)
-        {
-            return;
-        }
+        if (!config.BindSame) return;
 
         // Get the local endpoint of the client connection (the IP client connected to)
-        if (clientSocket.LocalEndPoint is not IPEndPoint localEndPoint)
-        {
-            return;
-        }
+        if (clientSocket.LocalEndPoint is not IPEndPoint localEndPoint) return;
 
         try
         {
@@ -114,149 +139,6 @@ public static class SocketExtensions
         catch
         {
             // Silently fail if binding fails
-        }
-    }
-
-    /// <summary>
-    /// Safe write - writes all data to socket, handling EINTR.
-    /// Aligns with tinyproxy C's safe_write() from network.c.
-    /// </summary>
-    public static async ValueTask SafeWriteAsync(
-        this Socket socket,
-        ReadOnlyMemory<byte> buffer,
-        CancellationToken cancellationToken = default)
-    {
-        int bytesToSend = buffer.Length;
-        int sent = 0;
-
-        while (sent < bytesToSend)
-        {
-            var result = await socket.SendAsync(
-                buffer.Slice(sent),
-                SocketFlags.None,
-                cancellationToken).ConfigureAwait(false);
-
-            if (result < 0)
-            {
-                throw new SocketException((int)SocketError.ConnectionReset);
-            }
-
-            sent += result;
-        }
-    }
-
-    /// <summary>
-    /// Safe read - reads data from socket, handling EINTR.
-    /// Aligns with tinyproxy C's safe_read() from network.c.
-    /// </summary>
-    public static async ValueTask<int> SafeReadAsync(
-        this Socket socket,
-        Memory<byte> buffer,
-        CancellationToken cancellationToken = default)
-    {
-        int totalRead = 0;
-
-        while (totalRead < buffer.Length)
-        {
-            var result = await socket.ReceiveAsync(
-                buffer.Slice(totalRead),
-                SocketFlags.None,
-                cancellationToken).ConfigureAwait(false);
-
-            if (result < 0)
-            {
-                throw new SocketException((int)SocketError.ConnectionReset);
-            }
-
-            if (result == 0)
-            {
-                // Connection closed
-                break;
-            }
-
-            totalRead += result;
-        }
-
-        return totalRead;
-    }
-
-    /// <summary>
-    /// Reads a line of text from socket.
-    /// Aligns with tinyproxy C's readline() from network.c.
-    /// </summary>
-    public static async ValueTask<string?> ReadLineAsync(
-        this Socket socket,
-        CancellationToken cancellationToken = default)
-    {
-        var buffer = new System.Text.StringBuilder();
-        var tempBuffer = new byte[1];
-
-        while (true)
-        {
-            var read = await socket.ReceiveAsync(
-                tempBuffer,
-                SocketFlags.None,
-                cancellationToken).ConfigureAwait(false);
-
-            if (read <= 0)
-            {
-                return null;
-            }
-
-            char c = (char)tempBuffer[0];
-            if (c == '\n')
-            {
-                break;
-            }
-
-            if (c != '\r')
-            {
-                buffer.Append(c);
-            }
-        }
-
-        return buffer.ToString();
-    }
-
-    /// <summary>
-    /// Reads a line of bytes from socket.
-    /// Zero-allocation version using ArrayPool.
-    /// </summary>
-    public static async ValueTask<Memory<byte>?> ReadLineBytesAsync(
-        this Socket socket,
-        CancellationToken cancellationToken = default)
-    {
-        const int MaxLineLength = 8192;
-        var buffer = ArrayPool<byte>.Shared.Rent(MaxLineLength);
-        int pos = 0;
-
-        try
-        {
-            while (pos < MaxLineLength)
-            {
-                var read = await socket.ReceiveAsync(
-                    buffer.AsMemory(pos, 1),
-                    SocketFlags.None,
-                    cancellationToken).ConfigureAwait(false);
-
-                if (read <= 0)
-                {
-                    return null;
-                }
-
-                if (buffer[pos] == '\n')
-                {
-                    return buffer.AsMemory(0, pos);
-                }
-
-                pos++;
-            }
-
-            throw new IOException("Line too long");
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 }

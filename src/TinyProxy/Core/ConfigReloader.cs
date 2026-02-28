@@ -1,6 +1,7 @@
-using System.Diagnostics;
+using System;
+using System.IO;
+using System.Threading;
 using TinyProxy.Config;
-using TinyProxy.Logging;
 
 namespace TinyProxy.Core;
 
@@ -71,10 +72,7 @@ public sealed class ConfigReloader : IDisposable
 
         // Check minimum interval between reloads
         var timeSinceLastReload = (DateTime.UtcNow - _lastReloadTime).TotalMilliseconds;
-        if (timeSinceLastReload < MinReloadIntervalMs)
-        {
-            return;
-        }
+        if (timeSinceLastReload < MinReloadIntervalMs) return;
 
         // Start/reset debounce timer
         _debounceTimer?.Change(ReloadDebounceMs, Timeout.Infinite);
@@ -106,7 +104,7 @@ public sealed class ConfigReloader : IDisposable
 
             if (File.Exists(_configPath))
             {
-                newConfig = Config.ConfigParser.LoadFromFile(_configPath);
+                newConfig = ConfigParser.LoadFromFile(_configPath);
             }
             else
             {

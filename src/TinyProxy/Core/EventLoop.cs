@@ -1,5 +1,9 @@
+using System;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
 
 namespace TinyProxy.Core;
@@ -15,10 +19,10 @@ public sealed class EventLoop : IDisposable
     private readonly Func<Socket, ValueTask> _handleConnection;
     private readonly ILogger _logger;
     private readonly ConnectionManager _connectionManager;
+
     private readonly Configuration _config;
-    // Use fixed-size array instead of List to reduce allocations
-    private readonly Task?[] _activeConnectionTasks;
-    private int _activeTaskCount = 0;
+    private readonly ConcurrentDictionary<int, Task> _activeConnectionTasks = new();
+    private int _nextTaskId;
     private bool _disposed;
     private Task? _runTask;
 
@@ -38,9 +42,6 @@ public sealed class EventLoop : IDisposable
         _listener = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         _listener.Bind(new IPEndPoint(address, port));
         _listener.Listen();
-
-        // Pre-allocate array for max concurrent connections
-        _activeConnectionTasks = new Task?[config.MaxClients];
     }
 
     /// <summary>
@@ -49,6 +50,26 @@ public sealed class EventLoop : IDisposable
     public void Start()
     {
         _runTask = RunAsync();
+    }
+
+    /// <summary>
+    /// Runs a connection handler task with proper cleanup.
+    /// </summary>
+    private async Task RunConnectionAsync(Socket socket, ConnectionSlot slot, CancellationToken token)
+    {
+        try
+        {
+            await _handleConnection(socket).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"Connection handler error: {ex.Message}");
+        }
+        finally
+        {
+            socket.Dispose();
+            slot.Dispose();
+        }
     }
 
     private async Task RunAsync()
@@ -60,13 +81,13 @@ public sealed class EventLoop : IDisposable
             _logger.LogInfo($"EventLoop started on {_listener.LocalEndPoint} (max clients: {_connectionManager.MaxClients})");
 
             while (!token.IsCancellationRequested)
-            {
                 try
                 {
                     var socket = await _listener.AcceptAsync(token).ConfigureAwait(false);
+                    var clientIp = GetClientIp(socket);
 
                     // Try to acquire a connection slot
-                    var slot = await _connectionManager.TryAcquireSlotAsync(null, token).ConfigureAwait(false);
+                    var slot = await _connectionManager.TryAcquireSlotAsync(clientIp, token).ConfigureAwait(false);
                     if (slot == null)
                     {
                         _logger.LogWarning($"Connection limit reached, rejecting {socket.RemoteEndPoint}");
@@ -78,42 +99,22 @@ public sealed class EventLoop : IDisposable
                         continue;
                     }
 
-                    if (_config.Verbose)
-                    {
-                        _logger.LogConnect($"Connection from {socket.RemoteEndPoint} (active: {_connectionManager.ActiveCount})");
-                    }
+                    if (_config.Verbose) _logger.LogConnect($"Connection from {socket.RemoteEndPoint} (active: {_connectionManager.ActiveCount})");
 
                     // Handle connection with slot management
-                    var taskIndex = Interlocked.Increment(ref _activeTaskCount) - 1;
-                    Task? task = null;
-                    task = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await _handleConnection(socket);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError($"Connection handler error: {ex.Message}");
-                        }
-                        finally
-                        {
-                            socket.Dispose();
-                            slot.Dispose();
-
-                            // Clear from tracking array
-                            if (taskIndex >= 0 && taskIndex < _activeConnectionTasks.Length)
-                            {
-                                _activeConnectionTasks[taskIndex] = null;
-                            }
-                        }
-                    }, token);
+                    var taskId = Interlocked.Increment(ref _nextTaskId);
+                    var task = RunConnectionAsync(socket, slot, token);
 
                     // Track task for graceful shutdown
-                    if (taskIndex >= 0 && taskIndex < _activeConnectionTasks.Length)
-                    {
-                        _activeConnectionTasks[taskIndex] = task;
-                    }
+                    _activeConnectionTasks[taskId] = task;
+                    _ = task.ContinueWith(
+                        _ =>
+                        {
+                            _activeConnectionTasks.TryRemove(taskId, out var removedTask);
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -123,7 +124,6 @@ public sealed class EventLoop : IDisposable
                 {
                     _logger.LogError($"Accept error: {ex.Message}");
                 }
-            }
         }
         finally
         {
@@ -162,5 +162,15 @@ public sealed class EventLoop : IDisposable
         // Don't wait for active connections - they will be aborted
         // The OS will clean up sockets when process exits
         _cts.Dispose();
+    }
+
+    private static string? GetClientIp(Socket socket)
+    {
+        return socket.RemoteEndPoint switch
+        {
+            IPEndPoint ip => ip.Address.ToString(),
+            DnsEndPoint dns => dns.Host,
+            _ => null
+        };
     }
 }

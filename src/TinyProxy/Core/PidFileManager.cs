@@ -1,6 +1,6 @@
+using System;
 using System.Diagnostics;
-using System.Text;
-using TinyProxy.Logging;
+using System.IO;
 
 namespace TinyProxy.Core;
 
@@ -19,10 +19,7 @@ public sealed class PidFileManager : IDisposable
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _pidFilePath = pidFilePath;
 
-        if (!string.IsNullOrEmpty(_pidFilePath))
-        {
-            WritePidFile();
-        }
+        if (!string.IsNullOrEmpty(_pidFilePath)) WritePidFile();
     }
 
     private void WritePidFile()
@@ -33,10 +30,7 @@ public sealed class PidFileManager : IDisposable
 
             // Ensure directory exists
             var directory = Path.GetDirectoryName(_pidFilePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory)) Directory.CreateDirectory(directory);
 
             if (!string.IsNullOrEmpty(_pidFilePath))
             {
@@ -56,7 +50,6 @@ public sealed class PidFileManager : IDisposable
         _disposed = true;
 
         if (!string.IsNullOrEmpty(_pidFilePath))
-        {
             try
             {
                 if (File.Exists(_pidFilePath))
@@ -69,6 +62,5 @@ public sealed class PidFileManager : IDisposable
             {
                 _logger.LogWarning($"Failed to remove PID file: {ex.Message}");
             }
-        }
     }
 }

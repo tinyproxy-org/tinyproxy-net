@@ -1,9 +1,13 @@
+using System;
 using System.Buffers;
+using System.IO;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
 using TinyProxy.Core;
-using TinyProxy.Logging;
 
 namespace TinyProxy.Protocol;
 
@@ -41,13 +45,9 @@ public sealed class SocksUpstreamProxy
 
             // Perform SOCKS handshake based on type
             if (_config.Type == UpstreamProxyType.Socks4)
-            {
                 await Socks4HandshakeAsync(socket, targetHost, targetPort, cts.Token).ConfigureAwait(false);
-            }
             else // SOCKS5
-            {
                 await Socks5HandshakeAsync(socket, targetHost, targetPort, cts.Token).ConfigureAwait(false);
-            }
 
             return socket;
         }
@@ -71,10 +71,8 @@ public sealed class SocksUpstreamProxy
     {
         // SOCKS4 only supports IPv4 addresses
         if (!System.Net.IPAddress.TryParse(targetHost, out var ipAddress) ||
-            ipAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
-        {
+            ipAddress.AddressFamily != AddressFamily.InterNetwork)
             throw new NotSupportedException($"SOCKS4 requires IPv4 address, got: {targetHost}");
-        }
 
         var ipBytes = ipAddress.GetAddressBytes();
 
@@ -115,7 +113,7 @@ public sealed class SocksUpstreamProxy
 
             var requestLength = 8 + (_config.Username?.Length ?? 0) + 1;
 
-            await socket.SendAsync(request.AsMemory(0, requestLength), SocketFlags.None, cts.Token).ConfigureAwait(false);
+            await socket.SendAllAsync(request.AsMemory(0, requestLength), cts.Token).ConfigureAwait(false);
 
             // SOCKS4 response:
             // +----+----+----+----+----+----+----+----+
@@ -126,11 +124,7 @@ public sealed class SocksUpstreamProxy
             var response = ArrayPool<byte>.Shared.Rent(8);
             try
             {
-                var received = await socket.ReceiveAsync(response, SocketFlags.None, cts.Token).ConfigureAwait(false);
-                if (received < 8)
-                {
-                    throw new InvalidOperationException("SOCKS4: Incomplete response");
-                }
+                await socket.ReceiveExactlyAsync(response.AsMemory(0, 8), cts.Token).ConfigureAwait(false);
 
                 if (response[1] != 90)
                 {
@@ -170,26 +164,30 @@ public sealed class SocksUpstreamProxy
         // +----+----------+----------+
         //  1    1     1 to 255
 
-        var greeting = ArrayPool<byte>.Shared.Rent(3);
+        var useUsernameAuth = !string.IsNullOrEmpty(_config.Username);
+        var greeting = ArrayPool<byte>.Shared.Rent(4);
         try
         {
             greeting[0] = 5; // SOCKS version 5
 
-            if (!string.IsNullOrEmpty(_config.Username))
+            int greetingLength;
+            if (useUsernameAuth)
             {
                 // Username/password authentication
                 greeting[1] = 2; // 2 methods
                 greeting[2] = 0x00; // No authentication
                 greeting[3] = 0x02; // Username/password
+                greetingLength = 4;
             }
             else
             {
                 // No authentication
                 greeting[1] = 1; // 1 method
                 greeting[2] = 0x00; // No authentication
+                greetingLength = 3;
             }
 
-            await socket.SendAsync(greeting.AsMemory(0, _config.Username != null ? 4 : 3), SocketFlags.None, cts.Token).ConfigureAwait(false);
+            await socket.SendAllAsync(greeting.AsMemory(0, greetingLength), cts.Token).ConfigureAwait(false);
 
             // Server response:
             // +----+--------+
@@ -200,28 +198,15 @@ public sealed class SocksUpstreamProxy
             var greetingResponse = ArrayPool<byte>.Shared.Rent(2);
             try
             {
-                var received = await socket.ReceiveAsync(greetingResponse, SocketFlags.None, cts.Token).ConfigureAwait(false);
-                if (received < 2)
-                {
-                    throw new InvalidOperationException("SOCKS5: Incomplete greeting response");
-                }
+                await socket.ReceiveExactlyAsync(greetingResponse.AsMemory(0, 2), cts.Token).ConfigureAwait(false);
 
-                if (greetingResponse[0] != 5)
-                {
-                    throw new InvalidOperationException($"SOCKS5: Invalid version {greetingResponse[0]}");
-                }
+                if (greetingResponse[0] != 5) throw new InvalidOperationException($"SOCKS5: Invalid version {greetingResponse[0]}");
 
                 var method = greetingResponse[1];
-                if (method == 0xFF)
-                {
-                    throw new InvalidOperationException("SOCKS5: No acceptable authentication method");
-                }
+                if (method == 0xFF) throw new InvalidOperationException("SOCKS5: No acceptable authentication method");
 
                 // If username/password auth required
-                if (method == 0x02)
-                {
-                    await PerformUsernamePasswordAuthAsync(socket, token).ConfigureAwait(false);
-                }
+                if (method == 0x02) await PerformUsernamePasswordAuthAsync(socket, cts.Token).ConfigureAwait(false);
             }
             finally
             {
@@ -235,7 +220,7 @@ public sealed class SocksUpstreamProxy
             //   1    1     1       1    Variable      2
 
             var connectRequest = BuildConnectRequest(targetHost, targetPort);
-            await socket.SendAsync(connectRequest, SocketFlags.None, cts.Token).ConfigureAwait(false);
+            await socket.SendAllAsync(connectRequest, cts.Token).ConfigureAwait(false);
 
             // CONNECT response:
             // +----+-----+-------+------+----------+----------+
@@ -243,19 +228,12 @@ public sealed class SocksUpstreamProxy
             // +----+-----+-------+------+----------+----------+
             //   1    1     1       1    Variable      2
 
-            var connectResponse = ArrayPool<byte>.Shared.Rent(10);
+            var connectResponse = ArrayPool<byte>.Shared.Rent(4 + 1 + 255 + 2);
             try
             {
-                var received = await socket.ReceiveAsync(connectResponse, SocketFlags.None, cts.Token).ConfigureAwait(false);
-                if (received < 4)
-                {
-                    throw new InvalidOperationException("SOCKS5: Incomplete connect response");
-                }
+                await socket.ReceiveExactlyAsync(connectResponse.AsMemory(0, 4), cts.Token).ConfigureAwait(false);
 
-                if (connectResponse[0] != 5)
-                {
-                    throw new InvalidOperationException($"SOCKS5: Invalid version {connectResponse[0]}");
-                }
+                if (connectResponse[0] != 5) throw new InvalidOperationException($"SOCKS5: Invalid version {connectResponse[0]}");
 
                 if (connectResponse[1] != 0)
                 {
@@ -278,44 +256,21 @@ public sealed class SocksUpstreamProxy
                 var atyp = connectResponse[3];
                 if (atyp == 1) // IPv4: 4 bytes
                 {
-                    // Already have 6 more bytes (4 IP + 2 port)
-                    if (received < 10)
-                    {
-                        await socket.ReceiveAsync(
-                            connectResponse.AsMemory(received, 10 - received),
-                            SocketFlags.None,
-                            cts.Token).ConfigureAwait(false);
-                    }
+                    await socket.ReceiveExactlyAsync(connectResponse.AsMemory(4, 6), cts.Token).ConfigureAwait(false);
                 }
                 else if (atyp == 3) // Domain: 1 byte length + domain
                 {
-                    if (received < 5)
-                    {
-                        throw new InvalidOperationException("SOCKS5: Incomplete connect response (domain)");
-                    }
-
+                    await socket.ReceiveExactlyAsync(connectResponse.AsMemory(4, 1), cts.Token).ConfigureAwait(false);
                     var domainLen = connectResponse[4];
-                    var expectedLen = 5 + domainLen + 2;
-                    if (received < expectedLen)
-                    {
-                        var remaining = expectedLen - received;
-                        await socket.ReceiveAsync(
-                            connectResponse.AsMemory(received, remaining),
-                            SocketFlags.None,
-                            cts.Token).ConfigureAwait(false);
-                    }
+                    await socket.ReceiveExactlyAsync(connectResponse.AsMemory(5, domainLen + 2), cts.Token).ConfigureAwait(false);
                 }
                 else if (atyp == 4) // IPv6: 16 bytes
                 {
-                    var expectedLen = 18;
-                    if (received < expectedLen)
-                    {
-                        var remaining = expectedLen - received;
-                        await socket.ReceiveAsync(
-                            connectResponse.AsMemory(received, remaining),
-                            SocketFlags.None,
-                            cts.Token).ConfigureAwait(false);
-                    }
+                    await socket.ReceiveExactlyAsync(connectResponse.AsMemory(4, 18), cts.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    throw new InvalidOperationException($"SOCKS5: Unsupported address type {atyp}");
                 }
             }
             finally
@@ -337,6 +292,8 @@ public sealed class SocksUpstreamProxy
     {
         var username = _config.Username ?? string.Empty;
         var password = _config.Password ?? string.Empty;
+        if (username.Length > byte.MaxValue || password.Length > byte.MaxValue)
+            throw new InvalidOperationException("SOCKS5: Username/password too long");
 
         // +----+------+----------+------+----------+
         // |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
@@ -344,42 +301,43 @@ public sealed class SocksUpstreamProxy
         //  1    1     variable    1     variable
 
         var authRequest = new byte[3 + username.Length + password.Length];
-        authRequest[0] = 1; // Username/password authentication version
-        authRequest[1] = (byte)username.Length;
-
         var userBytes = Encoding.ASCII.GetBytes(username);
-        Array.Copy(userBytes, 0, authRequest, 2, userBytes.Length);
-
-        authRequest[2 + userBytes.Length] = (byte)password.Length;
-
         var passBytes = Encoding.ASCII.GetBytes(password);
-        Array.Copy(passBytes, 0, authRequest, 3 + userBytes.Length, passBytes.Length);
 
-        await socket.SendAsync(authRequest, SocketFlags.None, token).ConfigureAwait(false);
-
-        // Server response:
-        // +----+--------+
-        // |VER | STATUS |
-        // +----+--------+
-        //   1      1
-
-        var authResponse = ArrayPool<byte>.Shared.Rent(2);
         try
         {
-            var received = await socket.ReceiveAsync(authResponse, SocketFlags.None, token).ConfigureAwait(false);
-            if (received < 2)
-            {
-                throw new InvalidOperationException("SOCKS5: Incomplete auth response");
-            }
+            authRequest[0] = 1; // Username/password authentication version
+            authRequest[1] = (byte)username.Length;
+            Array.Copy(userBytes, 0, authRequest, 2, userBytes.Length);
+            authRequest[2 + userBytes.Length] = (byte)password.Length;
+            Array.Copy(passBytes, 0, authRequest, 3 + userBytes.Length, passBytes.Length);
 
-            if (authResponse[1] != 0)
+            await socket.SendAllAsync(authRequest, token).ConfigureAwait(false);
+
+            // Server response:
+            // +----+--------+
+            // |VER | STATUS |
+            // +----+--------+
+            //   1      1
+
+            var authResponse = ArrayPool<byte>.Shared.Rent(2);
+            try
             {
-                throw new InvalidOperationException("SOCKS5: Authentication failed");
+                await socket.ReceiveExactlyAsync(authResponse.AsMemory(0, 2), token).ConfigureAwait(false);
+
+                if (authResponse[1] != 0) throw new InvalidOperationException("SOCKS5: Authentication failed");
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(authResponse);
             }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(authResponse);
+            // Clear sensitive data from memory
+            CryptographicOperations.ZeroMemory(authRequest);
+            CryptographicOperations.ZeroMemory(userBytes);
+            CryptographicOperations.ZeroMemory(passBytes);
         }
     }
 
@@ -388,7 +346,7 @@ public sealed class SocksUpstreamProxy
     /// </summary>
     private static ReadOnlyMemory<byte> BuildConnectRequest(string targetHost, int targetPort)
     {
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
 
         // Version and command
         ms.WriteByte(5); // SOCKS version
@@ -398,7 +356,7 @@ public sealed class SocksUpstreamProxy
         // Address type and address
         if (System.Net.IPAddress.TryParse(targetHost, out var ipAddress))
         {
-            if (ipAddress.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            if (ipAddress.AddressFamily == AddressFamily.InterNetwork)
             {
                 // IPv4
                 ms.WriteByte(1); // ATYP = IPv4
@@ -415,6 +373,8 @@ public sealed class SocksUpstreamProxy
         {
             // Domain name
             var hostBytes = Encoding.ASCII.GetBytes(targetHost);
+            if (hostBytes.Length > byte.MaxValue)
+                throw new InvalidOperationException("SOCKS5: Target host too long");
             ms.WriteByte(3); // ATYP = Domain
             ms.WriteByte((byte)hostBytes.Length);
             ms.Write(hostBytes, 0, hostBytes.Length);

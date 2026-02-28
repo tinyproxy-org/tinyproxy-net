@@ -1,3 +1,4 @@
+using System;
 using TinyProxy.Logging;
 
 namespace TinyProxy.Core;
@@ -24,9 +25,28 @@ public sealed class ConsoleLogger : ILogger
         }
     }
 
-    public void LogInfo(string message) => WriteLog("INFO", message);
-    public void LogError(string message) => WriteLog("ERROR", message);
-    public void LogWarning(string message) => WriteLog("WARN", message);
-    public void LogConnect(string message) => WriteLog("CONNECT", message);
-    public void LogCritical(string message) => WriteLog("CRITICAL", message);
+    public void LogInfo(string message)
+    {
+        WriteLog("INFO", message);
+    }
+
+    public void LogError(string message)
+    {
+        WriteLog("ERROR", message);
+    }
+
+    public void LogWarning(string message)
+    {
+        WriteLog("WARN", message);
+    }
+
+    public void LogConnect(string message)
+    {
+        WriteLog("CONNECT", message);
+    }
+
+    public void LogCritical(string message)
+    {
+        WriteLog("CRITICAL", message);
+    }
 }

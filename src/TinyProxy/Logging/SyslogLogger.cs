@@ -1,7 +1,6 @@
-using System.Net;
+using System;
 using System.Net.Sockets;
 using System.Text;
-using TinyProxy.Config;
 using TinyProxy.Core;
 
 namespace TinyProxy.Logging;
@@ -43,7 +42,6 @@ public sealed class SyslogLogger : ILogger, IDisposable
         _hostname = Environment.MachineName;
 
         if (!string.IsNullOrEmpty(server))
-        {
             try
             {
                 _udpClient = new UdpClient();
@@ -54,27 +52,41 @@ public sealed class SyslogLogger : ILogger, IDisposable
             {
                 _isEnabled = false;
             }
-        }
     }
 
-    public void LogCritical(string message) => Log(SeverityCritical, "CRITICAL", message);
+    public void LogCritical(string message)
+    {
+        Log(SeverityCritical, "CRITICAL", message);
+    }
 
-    public void LogError(string message) => Log(SeverityError, "ERROR", message);
+    public void LogError(string message)
+    {
+        Log(SeverityError, "ERROR", message);
+    }
 
-    public void LogWarning(string message) => Log(SeverityWarning, "WARNING", message);
+    public void LogWarning(string message)
+    {
+        Log(SeverityWarning, "WARNING", message);
+    }
 
-    public void LogNotice(string message) => Log(SeverityNotice, "NOTICE", message);
+    public void LogNotice(string message)
+    {
+        Log(SeverityNotice, "NOTICE", message);
+    }
 
-    public void LogInfo(string message) => Log(SeverityInfo, "INFO", message);
+    public void LogInfo(string message)
+    {
+        Log(SeverityInfo, "INFO", message);
+    }
 
-    public void LogConnect(string message) => Log(SeverityInfo, "CONNECT", message);
+    public void LogConnect(string message)
+    {
+        Log(SeverityInfo, "CONNECT", message);
+    }
 
     private void Log(int severity, string level, string message)
     {
-        if (!_isEnabled || _udpClient == null || _disposed)
-        {
-            return;
-        }
+        if (!_isEnabled || _udpClient == null || _disposed) return;
 
         try
         {
@@ -95,7 +107,7 @@ public sealed class SyslogLogger : ILogger, IDisposable
     private string FormatSyslogMessage(int severity, string level, string message)
     {
         // Calculate PRI value: (facility * 8) + severity
-        var pri = (FacilityUser * 8) + severity;
+        var pri = FacilityUser * 8 + severity;
 
         // Timestamp in ISO 8601 format
         var timestamp = DateTime.UtcNow.ToString("o");

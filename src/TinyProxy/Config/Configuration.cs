@@ -1,4 +1,6 @@
-using System.Text.RegularExpressions;
+using System;
+using System.Collections.Generic;
+using TinyProxy.Core;
 
 namespace TinyProxy.Config;
 
@@ -15,34 +17,34 @@ public sealed record Configuration
     /// <summary>
     /// Gets the listen port.
     /// </summary>
-    public ushort ListenPort { get; init; } = 9999;
+    public ushort ListenPort { get; init; } = ProxyConstants.DefaultPort;
 
     /// <summary>
     /// Gets the maximum number of concurrent clients.
     /// </summary>
-    public int MaxClients { get; init; } = 100;
+    public int MaxClients { get; init; } = ProxyConstants.DefaultMaxClients;
 
     /// <summary>
     /// Gets the maximum number of concurrent connections per IP address.
     /// Set to 0 to disable per-IP limiting.
     /// </summary>
-    public int MaxClientsPerIp { get; init; } = 10;
+    public int MaxClientsPerIp { get; init; } = ProxyConstants.DefaultMaxClientsPerIp;
 
     /// <summary>
     /// Gets the timeout for connections.
     /// </summary>
-    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(ProxyConstants.DefaultConnectionTimeoutSeconds);
 
     /// <summary>
     /// Gets the idle timeout for CONNECT tunnels.
     /// </summary>
-    public TimeSpan ConnectIdleTimeout { get; init; } = TimeSpan.FromSeconds(60);
+    public TimeSpan ConnectIdleTimeout { get; init; } = TimeSpan.FromSeconds(ProxyConstants.DefaultConnectIdleTimeoutSeconds);
 
     /// <summary>
     /// Gets the maximum allowed request body size in bytes.
     /// Set to 0 to disable limit (not recommended for production).
     /// </summary>
-    public long MaxRequestSize { get; init; } = 10 * 1024 * 1024; // 10 MB default
+    public long MaxRequestSize { get; init; } = ProxyConstants.DefaultMaxRequestSize;
 
     /// <summary>
     /// Gets the set of allowed IP addresses/patterns.
@@ -66,6 +68,14 @@ public sealed record Configuration
     public List<string> FilterPatterns { get; init; } = new();
 
     /// <summary>
+    /// Gets the path to the filter file containing URL patterns.
+    /// When set, filter patterns are loaded from this file.
+    /// The file is watched for changes and automatically reloaded.
+    /// Aligns with tinyproxy C's Filter option.
+    /// </summary>
+    public string? FilterFile { get; init; }
+
+    /// <summary>
     /// Gets whether filter patterns are case-sensitive.
     /// Aligns with tinyproxy C's FILTER_OPT_CASESENSITIVE.
     /// </summary>
@@ -78,11 +88,17 @@ public sealed record Configuration
     public bool FilterUseGlob { get; init; } = false;
 
     /// <summary>
+    /// Gets whether filtering matches full URL (true) or only host/domain (false).
+    /// Aligns with tinyproxy C's FILTER_OPT_URL / FilterURLs directive.
+    /// </summary>
+    public bool FilterUrls { get; init; } = false;
+
+    /// <summary>
     /// Gets the allowed CONNECT ports.
     /// If empty, all ports are allowed.
     /// Aligns with tinyproxy C's connect-ports.c.
     /// </summary>
-    public HashSet<ushort> AllowedConnectPorts { get; init; } = new() { 443 };
+    public HashSet<ushort> AllowedConnectPorts { get; init; } = new();
 
     /// <summary>
     /// Gets the upstream proxy configuration.
@@ -217,9 +233,50 @@ public sealed record Configuration
     public bool UseSyslog { get; init; } = false;
 
     /// <summary>
+    /// Gets the syslog server address.
+    /// Aligns with tinyproxy C's syslog configuration.
+    /// </summary>
+    public string? SyslogServer { get; init; }
+
+    /// <summary>
+    /// Gets the syslog server port.
+    /// Default is 514 (standard syslog port).
+    /// </summary>
+    public int SyslogPort { get; init; } = ProxyConstants.DefaultSyslogPort;
+
+    /// <summary>
+    /// Gets directory path for custom error pages.
+    /// When set, error pages are loaded from this directory.
+    /// Aligns with tinyproxy C's ErrorFile directive.
+    /// </summary>
+    public string? ErrorPagesDirectory { get; init; }
+
+    /// <summary>
+    /// Gets custom error page mappings by status code.
+    /// Key is HTTP status code, value is file path to custom error page.
+    /// Aligns with tinyproxy C's html-error.c.
+    /// </summary>
+    public Dictionary<int, string> CustomErrorPages { get; init; } = new();
+
+    /// <summary>
+    /// Gets custom headers to add to all outgoing requests.
+    /// Aligns with tinyproxy C's AddHeader directive.
+    /// </summary>
+    public List<HttpHeader> CustomHeaders { get; init; } = new();
+
+    /// <summary>
     /// Creates a default configuration.
     /// </summary>
     public static Configuration Default => new();
+}
+
+/// <summary>
+/// Represents a custom HTTP header.
+/// </summary>
+public sealed record HttpHeader
+{
+    public required string Name { get; init; }
+    public required string Value { get; init; }
 }
 
 /// <summary>

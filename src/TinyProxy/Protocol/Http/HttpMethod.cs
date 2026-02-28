@@ -1,3 +1,5 @@
+using System;
+
 namespace TinyProxy.Protocol.Http;
 
 /// <summary>
@@ -56,17 +58,20 @@ public static class HttpMethodParser
         };
     }
 
-    public static string ToHttpString(HttpMethod method) => method switch
+    public static string ToHttpString(HttpMethod method)
     {
-        HttpMethod.Get => "GET",
-        HttpMethod.Post => "POST",
-        HttpMethod.Put => "PUT",
-        HttpMethod.Delete => "DELETE",
-        HttpMethod.Head => "HEAD",
-        HttpMethod.Options => "OPTIONS",
-        HttpMethod.Patch => "PATCH",
-        HttpMethod.Trace => "TRACE",
-        HttpMethod.Connect => "CONNECT",
-        _ => "UNKNOWN"
-    };
+        return method switch
+        {
+            HttpMethod.Get => "GET",
+            HttpMethod.Post => "POST",
+            HttpMethod.Put => "PUT",
+            HttpMethod.Delete => "DELETE",
+            HttpMethod.Head => "HEAD",
+            HttpMethod.Options => "OPTIONS",
+            HttpMethod.Patch => "PATCH",
+            HttpMethod.Trace => "TRACE",
+            HttpMethod.Connect => "CONNECT",
+            _ => "UNKNOWN"
+        };
+    }
 }

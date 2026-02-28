@@ -1,8 +1,10 @@
+using System;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using TinyProxy.Config;
 using TinyProxy.Core;
-using TinyProxy.Logging;
 using TinyProxy.Metrics;
 
 namespace TinyProxy.Protocol;
@@ -75,12 +77,9 @@ public sealed class StatsHandler
                        $"\r\n{html}";
 
         var buffer = Encoding.UTF8.GetBytes(response);
-        await clientSocket.SendAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
+        await clientSocket.SendAllAsync(buffer, token).ConfigureAwait(false);
 
-        if (_config.Verbose)
-        {
-            _logger.LogInfo("Statistics page served");
-        }
+        if (_config.Verbose) _logger.LogInfo("Statistics page served");
     }
 
     private static string FormatBytes(long bytes)

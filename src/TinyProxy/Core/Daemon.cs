@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace TinyProxy.Core;
@@ -18,15 +20,10 @@ public static class Daemon
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux) &&
             !RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
             throw new PlatformNotSupportedException("Daemon mode is only supported on Unix-like systems");
-        }
 
         // First fork: parent exits, child continues
-        if (Fork() != 0)
-        {
-            Environment.Exit(0);
-        }
+        if (Fork() != 0) Environment.Exit(0);
 
         // Create new session
         Setsid();
@@ -35,10 +32,7 @@ public static class Daemon
         IgnoreSignal(Signal.SIGHUP);
 
         // Second fork: ensure we're not a session leader
-        if (Fork() != 0)
-        {
-            Environment.Exit(0);
-        }
+        if (Fork() != 0) Environment.Exit(0);
 
         // Change working directory to root
         try
@@ -179,7 +173,12 @@ public static class Daemon
         public override bool CanWrite => true;
         public override bool CanSeek => false;
         public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
 
         public override void Flush()
         {
@@ -211,10 +210,7 @@ public static class Daemon
 
         protected override void Dispose(bool disposing)
         {
-            if (_ownsFd && _fd >= 0)
-            {
-                unix_close(_fd);
-            }
+            if (_ownsFd && _fd >= 0) unix_close(_fd);
             base.Dispose(disposing);
         }
 

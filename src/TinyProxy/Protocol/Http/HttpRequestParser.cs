@@ -1,18 +1,23 @@
+using System;
 using System.Buffers;
+using System.Buffers.Text;
+using System.Collections.Generic;
 using System.Text;
 using TinyProxy.Core;
 
 namespace TinyProxy.Protocol.Http;
 
 /// <summary>
-/// HTTP request parser using Span<byte>.
+/// HTTP request parser using Span<byte> with optimized string handling.
+/// Uses array pooling and zero-copy techniques to minimize allocations.
 /// </summary>
 public sealed class HttpRequestParser
 {
     private readonly ILogger _logger;
+
+    // Character codes for fast comparison
     private const byte CR = (byte)'\r';
     private const byte LF = (byte)'\n';
-    private const byte Space = (byte)' ';
     private const byte Colon = (byte)':';
 
     public HttpRequestParser(ILogger logger)
@@ -28,62 +33,94 @@ public sealed class HttpRequestParser
     {
         request = null;
 
-        if (buffer.IsEmpty)
-        {
-            return false;
-        }
+        if (buffer.IsEmpty) return false;
 
         // Find end of headers (CRLF CRLF or LF LF for compatibility)
-        if (!FindHeadersEnd(buffer, out var headersEndPosition))
-        {
-            return false;
-        }
+        if (!FindHeadersEnd(buffer, out _)) return false;
 
         var reader = new SequenceReader<byte>(buffer);
 
-        // Parse request line: METHOD SP URI SP VERSION CRLF
-        if (!TryReadToSpan(ref reader, Space, out var methodSpan)) return false;
-        if (!TryReadToSpan(ref reader, Space, out var uriSpan)) return false;
-        if (!TryReadToSpan(ref reader, CR, out var versionSpan)) return false;
-        if (!reader.TryRead(out var next) || next != LF) return false;
-
-        var method = HttpMethodParser.Parse(methodSpan);
-        if (method == HttpMethod.None)
+        // Parse request line: METHOD SP URI SP VERSION (CR)LF.
+        // tinyproxy C skips leading blank lines before the actual request line.
+        byte[]? requestLineBytes = null;
+        while (true)
         {
-            _logger.LogWarning($"Unknown HTTP method: {Encoding.ASCII.GetString(methodSpan.ToArray())}");
-            return false;
+            if (!TryReadLine(ref reader, out var requestLine)) return false;
+            if (requestLine.IsEmpty) continue;
+            requestLineBytes = requestLine.ToArray();
+            break;
         }
 
-        var uri = Encoding.ASCII.GetString(uriSpan.ToArray());
-        var version = Encoding.ASCII.GetString(versionSpan.ToArray());
+        if (!TryParseRequestLine(requestLineBytes, out var methodSpan, out var uriSpan, out var versionSpan))
+            return false;
+
+        var rawMethod = GetAsciiString(methodSpan);
+        var method = HttpMethodParser.Parse(methodSpan);
+        if (method == HttpMethod.None) _logger.LogWarning($"Unknown HTTP method: {rawMethod}");
+
+        // tinyproxy C only accepts 2-token request lines for HTTP/0.9 GET.
+        if (versionSpan.SequenceEqual("HTTP/0.9"u8) && method != HttpMethod.Get)
+            return false;
+
+        var uri = GetAsciiString(uriSpan);
+        var version = GetAsciiString(versionSpan);
 
         // Parse headers
         var headers = new Dictionary<string, ReadOnlySequence<byte>>(StringComparer.OrdinalIgnoreCase);
+        var headerLines = new List<KeyValuePair<string, ReadOnlySequence<byte>>>(16);
         string? host = null;
         string? userAgent = null;
         string? contentType = null;
         long? contentLength = null;
+        string? currentHeaderName = null;
+        ArrayBufferWriter<byte>? currentHeaderValue = null;
+        var headerLineCount = 0;
 
-        while (!reader.End)
+        bool CommitCurrentHeader()
         {
-            // Check for end of headers (empty line)
-            if (reader.TryRead(out next) && next == CR)
+            if (currentHeaderName == null || currentHeaderValue == null) return true;
+
+            var valueBytes = currentHeaderValue.WrittenMemory.ToArray();
+            var headerValueSequence = new ReadOnlySequence<byte>(valueBytes);
+            headerLines.Add(new KeyValuePair<string, ReadOnlySequence<byte>>(currentHeaderName, headerValueSequence));
+
+            if (!headers.ContainsKey(currentHeaderName))
             {
-                if (!reader.TryRead(out next) || next != LF)
-                {
-                    return false; // Malformed
-                }
+                headers[currentHeaderName] = headerValueSequence;
+                ParseCommonHeader(
+                    currentHeaderName,
+                    currentHeaderValue.WrittenSpan,
+                    ref host,
+                    ref userAgent,
+                    ref contentType,
+                    ref contentLength);
+            }
+
+            currentHeaderName = null;
+            currentHeaderValue = null;
+            return true;
+        }
+
+        while (true)
+        {
+            if (!TryReadLine(ref reader, out var headerLine)) return false;
+            if (++headerLineCount > ProxyConstants.MaxHeaders) return false;
+
+            if (headerLine.IsEmpty)
+            {
+                if (!CommitCurrentHeader()) return false;
 
                 // End of headers
-                var consumed = buffer.Slice(0, buffer.GetPosition(0, reader.Position));
                 buffer = buffer.Slice(reader.Position);
 
                 request = new HttpRequest
                 {
                     Method = method,
+                    RawMethod = rawMethod,
                     Uri = uri,
                     Version = version,
                     Headers = headers,
+                    HeaderLines = headerLines,
                     Host = host,
                     UserAgent = userAgent,
                     ContentType = contentType,
@@ -94,50 +131,91 @@ public sealed class HttpRequestParser
                 return true;
             }
 
-            // Unread the byte we just peeked
-            reader.Rewind(1);
-
-            // Parse header: Name: Value CRLF
-            if (!TryReadToSpan(ref reader, Colon, out var headerNameSpan)) return false;
-
-            // Optional space after colon
-            if (reader.TryRead(out next) && next != Space)
+            // Header continuation (folding): append to previous header if present.
+            if (IsHeaderContinuationLine(headerLine))
             {
-                reader.Rewind(1);
+                if (currentHeaderValue != null)
+                {
+                    var continuationValue = TextUtils.Trim(headerLine);
+                    if (!continuationValue.IsEmpty)
+                    {
+                        var separator = currentHeaderValue.GetSpan(1);
+                        separator[0] = (byte)' ';
+                        currentHeaderValue.Advance(1);
+                        AppendBytes(currentHeaderValue, continuationValue);
+                    }
+                }
+
+                continue;
             }
 
-            if (!TryReadToSpan(ref reader, CR, out var headerValueSpan)) return false;
-            if (!reader.TryRead(out next) || next != LF) return false;
+            if (!CommitCurrentHeader()) return false;
 
-            var headerName = Encoding.ASCII.GetString(headerNameSpan.ToArray());
-            // Zero-copy: create ReadOnlySequence directly from span
-            var headerValue = new ReadOnlySequence<byte>(headerValueSpan.ToArray());
-            headers[headerName] = headerValue;
+            // Parse header: Name: Value.
+            // tinyproxy C ignores malformed headers instead of rejecting the entire request.
+            var colonIndex = headerLine.IndexOf(Colon);
+            if (colonIndex <= 0) continue;
 
-            // Parse common headers
-            ParseCommonHeader(headerName, headerValue, ref host, ref userAgent, ref contentType, ref contentLength);
+            var headerNameSpan = TextUtils.Trim(headerLine[..colonIndex]);
+            if (headerNameSpan.IsEmpty) continue;
+
+            var headerValueSpan = TextUtils.Trim(headerLine[(colonIndex + 1)..]);
+
+            currentHeaderName = GetAsciiString(headerNameSpan);
+            currentHeaderValue = new ArrayBufferWriter<byte>(Math.Max(headerValueSpan.Length, 16));
+            AppendBytes(currentHeaderValue, headerValueSpan);
         }
-
-        // Need more data
-        return false;
     }
 
-    private static bool TryReadToSpan(ref SequenceReader<byte> reader, byte delimiter, out ReadOnlySpan<byte> value)
+    private static bool TryReadLine(ref SequenceReader<byte> reader, out ReadOnlySpan<byte> line)
     {
-        value = ReadOnlySpan<byte>.Empty;
+        line = ReadOnlySpan<byte>.Empty;
 
-        if (!reader.TryReadTo(out ReadOnlySpan<byte> span, delimiter))
+        // Read to LF and trim optional CR.
+        if (!reader.TryReadTo(out ReadOnlySpan<byte> rawLine, LF)) return false;
+        if (!rawLine.IsEmpty && rawLine[^1] == CR)
+            line = rawLine[..^1];
+        else
+            line = rawLine;
+
+        return true;
+    }
+
+    private static bool TryParseRequestLine(
+        ReadOnlySpan<byte> requestLine,
+        out ReadOnlySpan<byte> method,
+        out ReadOnlySpan<byte> uri,
+        out ReadOnlySpan<byte> version)
+    {
+        method = ReadOnlySpan<byte>.Empty;
+        uri = ReadOnlySpan<byte>.Empty;
+        version = ReadOnlySpan<byte>.Empty;
+
+        var firstSpace = requestLine.IndexOf((byte)' ');
+        if (firstSpace <= 0) return false;
+
+        var secondSpaceRelative = requestLine[(firstSpace + 1)..].IndexOf((byte)' ');
+        if (secondSpaceRelative < 0)
         {
-            return false;
+            method = requestLine[..firstSpace];
+            uri = requestLine[(firstSpace + 1)..];
+            version = "HTTP/0.9"u8;
+            return !uri.IsEmpty;
         }
 
-        value = span;
-        return true;
+        if (secondSpaceRelative == 0) return false;
+
+        var secondSpace = firstSpace + 1 + secondSpaceRelative;
+
+        method = requestLine[..firstSpace];
+        uri = requestLine[(firstSpace + 1)..secondSpace];
+        version = requestLine[(secondSpace + 1)..];
+        return !version.IsEmpty;
     }
 
     private static void ParseCommonHeader(
         string name,
-        ReadOnlySequence<byte> value,
+        ReadOnlySpan<byte> value,
         ref string? host,
         ref string? userAgent,
         ref string? contentType,
@@ -145,27 +223,41 @@ public sealed class HttpRequestParser
     {
         if (value.Length == 0) return;
 
-        var valueStr = Encoding.ASCII.GetString(value.ToArray());
-        var trimmedValue = valueStr.Trim();
-
-        switch (name.ToUpperInvariant())
+        if (name.Equals("Host", StringComparison.OrdinalIgnoreCase))
         {
-            case "HOST":
-                host = trimmedValue;
-                break;
-            case "USER-AGENT":
-                userAgent = trimmedValue;
-                break;
-            case "CONTENT-TYPE":
-                contentType = trimmedValue;
-                break;
-            case "CONTENT-LENGTH":
-                if (long.TryParse(trimmedValue, out var cl))
-                {
-                    contentLength = cl;
-                }
-                break;
+            host = GetAsciiString(value);
+            return;
         }
+
+        if (name.Equals("User-Agent", StringComparison.OrdinalIgnoreCase))
+        {
+            userAgent = GetAsciiString(value);
+            return;
+        }
+
+        if (name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+        {
+            contentType = GetAsciiString(value);
+            return;
+        }
+
+        if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) &&
+            Utf8Parser.TryParse(value, out long cl, out var consumed) &&
+            consumed == value.Length &&
+            cl >= 0)
+            contentLength = cl;
+    }
+
+    private static bool IsHeaderContinuationLine(ReadOnlySpan<byte> line)
+    {
+        return !line.IsEmpty && (line[0] == (byte)' ' || line[0] == (byte)'\t');
+    }
+
+    private static void AppendBytes(ArrayBufferWriter<byte> writer, ReadOnlySpan<byte> source)
+    {
+        if (source.IsEmpty) return;
+        source.CopyTo(writer.GetSpan(source.Length));
+        writer.Advance(source.Length);
     }
 
     /// <summary>
@@ -176,42 +268,42 @@ public sealed class HttpRequestParser
     {
         position = default;
 
-        if (buffer.Length < 2)
-        {
-            return false;
-        }
+        if (buffer.Length < 2) return false;
 
         var reader = new SequenceReader<byte>(buffer);
+        byte p3 = 0, p2 = 0, p1 = 0;
 
-        while (reader.Remaining >= 2)
+        while (reader.TryRead(out var b))
         {
-            if (reader.TryRead(out var b) && b == '\r')
+            // Check for LF LF (non-standard but allowed by tinyproxy)
+            if (p1 == LF && b == LF)
             {
-                // Check for CRLF CRLF
-                if (reader.TryRead(out var b2) && b2 == '\n')
-                {
-                    if (reader.TryRead(out var b3) && b3 == '\r')
-                    {
-                        if (reader.TryRead(out var b4) && b4 == '\n')
-                        {
-                            position = reader.Position;
-                            return true;
-                        }
-                    }
-                }
+                position = reader.Position;
+                return true;
             }
-            else if (b == '\n')
+
+            // Check for CRLF CRLF
+            if (p3 == CR && p2 == LF && p1 == CR && b == LF)
             {
-                // Check for LF LF (non-standard but allowed by tinyproxy)
-                var nextPos = reader.Position;
-                if (reader.TryRead(out var b2) && b2 == '\n')
-                {
-                    position = nextPos;
-                    return true;
-                }
+                position = reader.Position;
+                return true;
             }
+
+            p3 = p2;
+            p2 = p1;
+            p1 = b;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Converts a byte span to ASCII string.
+    /// </summary>
+    private static string GetAsciiString(ReadOnlySpan<byte> span)
+    {
+        if (span.Length == 0) return string.Empty;
+
+        return Encoding.ASCII.GetString(span);
     }
 }

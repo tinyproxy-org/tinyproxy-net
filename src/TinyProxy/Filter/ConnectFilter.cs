@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using TinyProxy.Config;
 
 namespace TinyProxy.Filter;
@@ -23,10 +25,7 @@ public sealed class ConnectFilter
     public bool IsPortAllowed(ushort port)
     {
         // If no ports configured, allow all ports
-        if (_config.AllowedConnectPorts.Count == 0)
-        {
-            return true;
-        }
+        if (_config.AllowedConnectPorts.Count == 0) return true;
 
         return _config.AllowedConnectPorts.Contains(port);
     }
@@ -41,13 +40,16 @@ public sealed class ConnectFilter
     }
 
     /// <summary>
-    /// Gets the default allowed ports for CONNECT.
-    /// Default is only port 443 (HTTPS).
+    /// Gets the default CONNECT port set.
+    /// Empty means all ports are allowed unless ConnectPort directives are configured.
     /// </summary>
-    public static HashSet<ushort> DefaultPorts => new() { 443 };
+    public static HashSet<ushort> DefaultPorts => new();
 
     /// <summary>
     /// Validates that the port is in a valid range (1-65535).
     /// </summary>
-    public static bool IsValidPort(ushort port) => port > 0;
+    public static bool IsValidPort(ushort port)
+    {
+        return port > 0;
+    }
 }
