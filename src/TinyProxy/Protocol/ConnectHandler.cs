@@ -89,7 +89,10 @@ public sealed class ConnectHandler
                         upstreamStatusCode,
                         _config.AddViaHeader,
                         _config.ViaProxyName,
-                        GetViaProtocolToken(request.Version));
+                        GetViaProtocolToken(request.Version),
+                        _config.ReverseBaseUrl,
+                        _config.ReversePaths,
+                        reverseMagicCookiePath: null);
 
                     // Align with tinyproxy C behavior for CONNECT over HTTP upstream:
                     // forward upstream response to client instead of generating local 200.
@@ -193,10 +196,35 @@ public sealed class ConnectHandler
         var dotIndex = versionPart.IndexOf('.');
         if (dotIndex <= 0 || dotIndex >= versionPart.Length - 1) return false;
 
-        if (!int.TryParse(versionPart[..dotIndex], out var major) || major != 1)
+        if (!TryParseUnsignedPrefix(versionPart[..dotIndex], requireWholeToken: true, out var major) || major != 1)
             return false;
 
-        return int.TryParse(versionPart[(dotIndex + 1)..], out minor);
+        return TryParseUnsignedPrefix(versionPart[(dotIndex + 1)..], requireWholeToken: false, out minor);
+    }
+
+    // Matches tinyproxy C's sscanf("HTTP/%u.%u") behavior: accept trailing chars after minor.
+    private static bool TryParseUnsignedPrefix(ReadOnlySpan<char> value, bool requireWholeToken, out int number)
+    {
+        number = 0;
+        if (value.IsEmpty) return false;
+
+        var consumed = 0;
+        while (consumed < value.Length)
+        {
+            var current = value[consumed];
+            if (current < '0' || current > '9') break;
+
+            var digit = current - '0';
+            if (number > (int.MaxValue - digit) / 10) return false;
+
+            number = (number * 10) + digit;
+            consumed++;
+        }
+
+        if (consumed == 0) return false;
+        if (requireWholeToken && consumed != value.Length) return false;
+
+        return true;
     }
 
     private void RecordPotentialLoopEndpoint(Socket socket, int destinationPort)
@@ -212,7 +240,8 @@ public sealed class ConnectHandler
         Http.HttpRequest request,
         CancellationToken token)
     {
-        if (_config.UpstreamProxy == null)
+        var upstream = _config.ResolveUpstreamProxy(targetHost);
+        if (upstream == null)
         {
             var directSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
             await directSocket.ConnectAsync(targetHost, targetPort, _config.Timeout, token).ConfigureAwait(false);
@@ -220,7 +249,6 @@ public sealed class ConnectHandler
             return (directSocket, ReadOnlySequence<byte>.Empty, ReadOnlyMemory<byte>.Empty, 0);
         }
 
-        var upstream = _config.UpstreamProxy;
         if (upstream.Type is UpstreamProxyType.Socks4 or UpstreamProxyType.Socks5)
         {
             var socksProxy = new SocksUpstreamProxy(_logger, upstream, _config.Timeout);

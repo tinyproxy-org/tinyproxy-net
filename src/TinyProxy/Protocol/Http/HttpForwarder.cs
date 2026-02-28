@@ -79,15 +79,16 @@ public sealed class HttpForwarder
 
         if (_config.Verbose) _logger.LogInfo($"Forwarding {request.GetMethodToken()} {request.Uri}");
 
+        var upstream = _config.ResolveUpstreamProxy(host);
         Socket serverSocket = null!;
         long bytesReceived = 0;
 
         try
         {
             // Check if upstream proxy is configured
-            if (_config.UpstreamProxy != null)
+            if (upstream != null)
             {
-                serverSocket = await ConnectViaUpstreamAsync(host, port, token).ConfigureAwait(false);
+                serverSocket = await ConnectViaUpstreamAsync(upstream, host, port, token).ConfigureAwait(false);
             }
             else
             {
@@ -115,7 +116,7 @@ public sealed class HttpForwarder
             RecordPotentialLoopEndpoint(serverSocket, port);
 
             // Build modified request
-            var useAbsoluteUri = _config.UpstreamProxy?.Type == UpstreamProxyType.Http;
+            var useAbsoluteUri = upstream?.Type == UpstreamProxyType.Http;
             var requestBuffer = BuildForwardRequest(request, host, port, useAbsoluteUri);
             await serverSocket.SendAllAsync(requestBuffer, token).ConfigureAwait(false);
 
@@ -128,6 +129,7 @@ public sealed class HttpForwarder
                 connection.ClientSocket,
                 request.Method,
                 request.Version,
+                request.ReverseMagicCookiePath,
                 token).ConfigureAwait(false);
 
             _stats.AddBytesSent(bytesSent);
@@ -195,10 +197,12 @@ public sealed class HttpForwarder
         }
     }
 
-    private async Task<Socket> ConnectViaUpstreamAsync(string targetHost, int targetPort, CancellationToken token)
+    private async Task<Socket> ConnectViaUpstreamAsync(
+        UpstreamProxyConfig upstream,
+        string targetHost,
+        int targetPort,
+        CancellationToken token)
     {
-        var upstream = _config.UpstreamProxy!;
-
         // Handle SOCKS upstream proxies
         if (upstream.Type == UpstreamProxyType.Socks4 || upstream.Type == UpstreamProxyType.Socks5)
         {
@@ -227,6 +231,7 @@ public sealed class HttpForwarder
     {
         // Use StringBuilder for better performance with string concatenation
         var sb = StringBuilderCache.Acquire();
+        var upstream = _config.ResolveUpstreamProxy(host);
 
         try
         {
@@ -291,10 +296,13 @@ public sealed class HttpForwarder
                     AppendFilteredHeader(header.Key, header.Value);
             }
 
-            // Add proxy authentication for upstream proxy
-            if (_config.UpstreamProxy?.Username != null)
+            // Add proxy authentication only for HTTP upstream requests.
+            // tinyproxy C only emits Proxy-Authorization for PT_HTTP upstream.
+            if (useAbsoluteUri &&
+                upstream?.Type == UpstreamProxyType.Http &&
+                !string.IsNullOrEmpty(upstream.Username))
             {
-                var credentials = $"{_config.UpstreamProxy.Username}:{_config.UpstreamProxy.Password}";
+                var credentials = $"{upstream.Username}:{upstream.Password}";
                 var encoded = Convert.ToBase64String(Encoding.ASCII.GetBytes(credentials));
                 sb.Append("Proxy-Authorization: Basic ").Append(encoded);
                 sb.Append(ProxyConstants.Crlf);
@@ -371,8 +379,9 @@ public sealed class HttpForwarder
 
     private static string NormalizeOutboundHttpVersion(string? requestVersion)
     {
-        if (string.IsNullOrWhiteSpace(requestVersion)) return "HTTP/1.0";
-        if (requestVersion.StartsWith("HTTP/1.", StringComparison.OrdinalIgnoreCase)) return requestVersion;
+        if (TryParseHttpVersion(requestVersion, out var major, out var minor) && major == 1)
+            return $"HTTP/1.{minor}";
+
         return "HTTP/1.0";
     }
 
@@ -403,8 +412,33 @@ public sealed class HttpForwarder
         var dotIndex = versionPart.IndexOf('.');
         if (dotIndex <= 0 || dotIndex >= versionPart.Length - 1) return false;
 
-        return int.TryParse(versionPart[..dotIndex], out major) &&
-               int.TryParse(versionPart[(dotIndex + 1)..], out minor);
+        return TryParseUnsignedPrefix(versionPart[..dotIndex], requireWholeToken: true, out major) &&
+               TryParseUnsignedPrefix(versionPart[(dotIndex + 1)..], requireWholeToken: false, out minor);
+    }
+
+    // Matches tinyproxy C's sscanf("HTTP/%u.%u"): numeric major/minor with optional trailing chars after minor.
+    private static bool TryParseUnsignedPrefix(ReadOnlySpan<char> value, bool requireWholeToken, out int number)
+    {
+        number = 0;
+        if (value.IsEmpty) return false;
+
+        var consumed = 0;
+        while (consumed < value.Length)
+        {
+            var current = value[consumed];
+            if (current < '0' || current > '9') break;
+
+            var digit = current - '0';
+            if (number > (int.MaxValue - digit) / 10) return false;
+
+            number = (number * 10) + digit;
+            consumed++;
+        }
+
+        if (consumed == 0) return false;
+        if (requireWholeToken && consumed != value.Length) return false;
+
+        return true;
     }
 
     private async ValueTask ForwardRequestBodyAsync(
@@ -612,6 +646,7 @@ public sealed class HttpForwarder
         Socket client,
         HttpMethod requestMethod,
         string requestVersion,
+        string? reverseMagicCookiePath,
         CancellationToken token)
     {
         var headerBuffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.InitialHeaderBufferSize);
@@ -664,7 +699,10 @@ public sealed class HttpForwarder
                     statusCode,
                     _config.AddViaHeader,
                     _config.ViaProxyName,
-                    viaProtocolToken);
+                    viaProtocolToken,
+                    _config.ReverseBaseUrl,
+                    _config.ReversePaths,
+                    _config.ReverseMagicEnabled ? reverseMagicCookiePath : null);
                 if (!omitResponseHeaders)
                 {
                     await client.SendAllAsync(sanitizedHeader, token).ConfigureAwait(false);
@@ -984,7 +1022,10 @@ public sealed class HttpForwarder
         int statusCode,
         bool addViaHeader,
         string? viaProxyName,
-        string viaProtocolToken)
+        string viaProtocolToken,
+        string? reverseBaseUrl,
+        IReadOnlyList<ReversePathConfig> reversePaths,
+        string? reverseMagicCookiePath)
     {
         // Preserve 101 response headers to avoid breaking protocol upgrades.
         if (statusCode == 101) return headerSpan.ToArray();
@@ -1016,6 +1057,15 @@ public sealed class HttpForwarder
                     }
 
                     if (ShouldSkipResponseHeader(name, connectionTokenHeaders)) continue;
+
+                    if (!string.IsNullOrEmpty(reverseBaseUrl) &&
+                        name.Equals("Location", StringComparison.OrdinalIgnoreCase) &&
+                        TryRewriteLocationForReverseProxy(value, reverseBaseUrl!, reversePaths, out var rewrittenLocation))
+                    {
+                        sb.Append("Location: ").Append(rewrittenLocation).Append(ProxyConstants.Crlf);
+                        continue;
+                    }
+
                     sb.Append(name).Append(": ").Append(value).Append(ProxyConstants.Crlf);
                 }
 
@@ -1029,6 +1079,14 @@ public sealed class HttpForwarder
                     sb.Append("Via: ");
                     if (!string.IsNullOrWhiteSpace(upstreamViaHeader)) sb.Append(upstreamViaHeader).Append(", ");
                     sb.Append(viaProtocolToken).Append(' ').Append(proxyName).Append(ProxyConstants.Crlf);
+                }
+
+                if (!string.IsNullOrEmpty(reverseMagicCookiePath))
+                {
+                    sb.Append("Set-Cookie: RPLPATH=")
+                        .Append(reverseMagicCookiePath)
+                        .Append("; path=/")
+                        .Append(ProxyConstants.Crlf);
                 }
 
                 sb.Append(ProxyConstants.Crlf);
@@ -1056,6 +1114,28 @@ public sealed class HttpForwarder
                headerName.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase) ||
                headerName.Equals("Proxy-Authenticate", StringComparison.OrdinalIgnoreCase) ||
                headerName.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryRewriteLocationForReverseProxy(
+        string locationValue,
+        string reverseBaseUrl,
+        IReadOnlyList<ReversePathConfig> reversePaths,
+        out string rewrittenLocation)
+    {
+        rewrittenLocation = string.Empty;
+        if (reversePaths.Count == 0) return false;
+
+        foreach (var reversePath in reversePaths)
+        {
+            var upstreamPrefix = reversePath.Url;
+            if (!locationValue.StartsWith(upstreamPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var localPath = reversePath.Path.Length > 0 ? reversePath.Path[1..] : string.Empty;
+            rewrittenLocation = string.Concat(reverseBaseUrl, localPath, locationValue[upstreamPrefix.Length..]);
+            return true;
+        }
+
+        return false;
     }
 
     private static List<(string Name, string Value)> ParseHeaderLines(ReadOnlySpan<byte> headerSpan, out string statusLine)
@@ -1346,10 +1426,27 @@ public sealed class HttpForwarder
     {
         if (TryGetAbsoluteUriScheme(uri, out var scheme))
         {
-            // Keep existing HTTP/HTTPS absolute-form as-is.
             if (scheme.Equals("http".AsSpan(), StringComparison.OrdinalIgnoreCase) ||
                 scheme.Equals("https".AsSpan(), StringComparison.OrdinalIgnoreCase))
+            {
+                // tinyproxy C strips userinfo before building outbound request target.
+                // Do the same to avoid forwarding credentials to upstream.
+                if (Uri.TryCreate(uri, UriKind.Absolute, out var absoluteHttpUri) &&
+                    !string.IsNullOrEmpty(absoluteHttpUri.UserInfo))
+                {
+                    var pathAndQuery = absoluteHttpUri.GetComponents(UriComponents.PathAndQuery, UriFormat.UriEscaped);
+                    if (string.IsNullOrEmpty(pathAndQuery)) pathAndQuery = "/";
+
+                    var isHttps = absoluteHttpUri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase);
+                    var defaultPort = isHttps ? 443 : 80;
+                    var sanitizedPortSuffix = port == defaultPort ? "" : $":{port}";
+                    var normalizedScheme = isHttps ? "https" : "http";
+                    return $"{normalizedScheme}://{host}{sanitizedPortSuffix}{pathAndQuery}";
+                }
+
+                // Keep existing HTTP/HTTPS absolute-form as-is.
                 return uri;
+            }
 
             // tinyproxy C rewrites upstream absolute-form to http://host:port/path.
             if (Uri.TryCreate(uri, UriKind.Absolute, out var absoluteUri))
@@ -1384,7 +1481,7 @@ public sealed class HttpForwarder
             }
 
             // tinyproxy C only accepts ftp:// when an upstream proxy is configured.
-            if (_config.UpstreamProxy == null)
+            if (!_config.HasUpstreamProxyConfigured)
             {
                 host = string.Empty;
                 port = 0;

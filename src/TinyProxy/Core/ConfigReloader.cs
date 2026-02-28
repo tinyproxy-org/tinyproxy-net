@@ -18,16 +18,20 @@ public sealed class ConfigReloader : IDisposable
     private const int ReloadDebounceMs = 500; // Debounce rapid file changes
     private const int MinReloadIntervalMs = 1000; // Minimum time between reloads
     private bool _disposed;
-    private Configuration? _lastConfig;
+    private string? _lastConfigContent;
+    private bool _lastConfigWasMissing;
 
     public ConfigReloader(
         ILogger logger,
         string configPath,
-        Action<Configuration> reloadAction)
+        Action<Configuration> reloadAction,
+        bool enableFileWatcher = true)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _configPath = configPath ?? throw new ArgumentNullException(nameof(configPath));
         _reloadAction = reloadAction ?? throw new ArgumentNullException(nameof(reloadAction));
+
+        if (!enableFileWatcher) return;
 
         try
         {
@@ -96,50 +100,40 @@ public sealed class ConfigReloader : IDisposable
             _logger.LogInfo($"Reloading configuration from {_configPath}");
 
             Configuration newConfig;
+            string? configContent = null;
+            var configMissing = false;
 
             if (File.Exists(_configPath))
             {
-                newConfig = ConfigParser.LoadFromFile(_configPath);
+                configContent = File.ReadAllText(_configPath);
+                newConfig = ConfigParser.Parse(configContent);
             }
             else
             {
                 _logger.LogWarning($"Config file not found, using default configuration");
                 newConfig = Configuration.Default;
+                configMissing = true;
             }
 
-            // Only reload if configuration actually changed
-            if (!ConfigEquals(_lastConfig, newConfig))
-            {
-                _reloadAction(newConfig);
-                _lastConfig = newConfig;
-                _logger.LogInfo("Configuration reloaded successfully");
-            }
-            else
+            var configUnchanged =
+                _lastConfigWasMissing == configMissing &&
+                string.Equals(_lastConfigContent, configContent, StringComparison.Ordinal);
+
+            if (configUnchanged)
             {
                 _logger.LogInfo("Configuration unchanged, skipping reload");
+                return;
             }
+
+            _reloadAction(newConfig);
+            _lastConfigContent = configContent;
+            _lastConfigWasMissing = configMissing;
+            _logger.LogInfo("Configuration reloaded successfully");
         }
         catch (Exception ex)
         {
             _logger.LogError($"Failed to reload configuration: {ex.Message}");
         }
-    }
-
-    /// <summary>
-    /// Simple comparison to detect actual configuration changes.
-    /// In production, you might want to implement IEquatable<Configuration>
-    /// </summary>
-    private static bool ConfigEquals(Configuration? a, Configuration? b)
-    {
-        if (a is null && b is null) return true;
-        if (a is null || b is null) return false;
-
-        return a.ListenAddress == b.ListenAddress &&
-               a.ListenPort == b.ListenPort &&
-               a.MaxClients == b.MaxClients &&
-               a.Timeout == b.Timeout &&
-               a.IsTransparentProxyEnabled == b.IsTransparentProxyEnabled &&
-               a.IsReverseProxyEnabled == b.IsReverseProxyEnabled;
     }
 
     /// <summary>

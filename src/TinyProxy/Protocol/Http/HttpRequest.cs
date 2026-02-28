@@ -19,6 +19,7 @@ public sealed class HttpRequest
     public string? UserAgent { get; init; }
     public string? ContentType { get; init; }
     public long? ContentLength { get; init; }
+    public string? ReverseMagicCookiePath { get; init; }
 
     /// <summary>
     /// Gets the target host and port from the request.
@@ -57,11 +58,6 @@ public sealed class HttpRequest
 
         var authorityPart = afterProto.Substring(0, slashIndex);
         path = slashIndex < afterProto.Length ? afterProto.Substring(slashIndex) : "/";
-
-        // tinyproxy C strips user:pass@ before host/port parsing.
-        var atIndex = authorityPart.LastIndexOf('@');
-        if (atIndex >= 0 && atIndex + 1 < authorityPart.Length)
-            authorityPart = authorityPart[(atIndex + 1)..];
 
         return TextUtils.TryParseHostPort(authorityPart, defaultPort, out host, out port);
     }
@@ -108,7 +104,27 @@ public sealed class HttpRequest
             Host = Host,
             UserAgent = UserAgent,
             ContentType = ContentType,
-            ContentLength = ContentLength
+            ContentLength = ContentLength,
+            ReverseMagicCookiePath = ReverseMagicCookiePath
+        };
+    }
+
+    public HttpRequest WithReverseMagicCookiePath(string reverseMagicCookiePath)
+    {
+        return new HttpRequest
+        {
+            Method = Method,
+            RawMethod = RawMethod,
+            Uri = Uri,
+            Version = Version,
+            Headers = Headers,
+            HeaderLines = HeaderLines,
+            Body = Body,
+            Host = Host,
+            UserAgent = UserAgent,
+            ContentType = ContentType,
+            ContentLength = ContentLength,
+            ReverseMagicCookiePath = reverseMagicCookiePath
         };
     }
 
@@ -129,7 +145,8 @@ public sealed class HttpRequest
             Host = Host,
             UserAgent = UserAgent,
             ContentType = ContentType,
-            ContentLength = ContentLength
+            ContentLength = ContentLength,
+            ReverseMagicCookiePath = ReverseMagicCookiePath
         };
     }
 }

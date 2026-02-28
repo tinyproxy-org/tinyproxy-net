@@ -23,6 +23,7 @@ public sealed partial class ConfigParser
         var reversePaths = new List<ReversePathConfig>();
         var customErrorPages = new Dictionary<int, string>();
         var customHeaders = new List<HttpHeader>();
+        var upstreamRules = new List<UpstreamProxyRuleConfig>();
 
         foreach (var line in content.Split('\n'))
         {
@@ -35,7 +36,7 @@ public sealed partial class ConfigParser
             if (!match.Success) continue;
 
             var directive = match.Groups[1].Value;
-            var value = match.Groups[2].Value.Trim('"');
+            var value = NormalizeDirectiveValue(match.Groups[2].Value);
 
             switch (directive.ToLowerInvariant())
             {
@@ -145,6 +146,11 @@ public sealed partial class ConfigParser
                     if (TryParseTinyProxyBoolean(value, out var via)) config = config with { AddViaHeader = via };
                     break;
 
+                case "disableviaheader":
+                    if (TryParseTinyProxyBoolean(value, out var disableVia))
+                        config = config with { AddViaHeader = !disableVia };
+                    break;
+
                 case "viaproxyname":
                     config = config with { ViaProxyName = value };
                     break;
@@ -174,13 +180,23 @@ public sealed partial class ConfigParser
                     break;
 
                 case "reverseproxy":
-                    ParseReverseProxy(value, out var rpPath, out var rpUrl);
-                    if (rpPath != null && rpUrl != null)
-                    {
-                        reversePaths.Add(new ReversePathConfig { Path = rpPath, Url = rpUrl });
-                        config = config with { IsReverseProxyEnabled = true };
-                    }
+                case "reversepath":
+                    if (TryParseReversePath(value, out var reversePath))
+                        config = AddReversePath(config, reversePaths, reversePath);
+                    break;
 
+                case "reversemagic":
+                    if (TryParseTinyProxyBoolean(value, out var reverseMagic))
+                        config = config with { ReverseMagicEnabled = reverseMagic };
+                    break;
+
+                case "reverseonly":
+                    if (TryParseTinyProxyBoolean(value, out var reverseOnly))
+                        config = config with { ReverseOnly = reverseOnly };
+                    break;
+
+                case "reversebaseurl":
+                    config = config with { ReverseBaseUrl = value };
                     break;
 
                 case "transparent":
@@ -198,8 +214,8 @@ public sealed partial class ConfigParser
                     break;
 
                 case "upstream":
-                    ParseUpstream(value, out var usHost, out var usPort, out var usType);
-                    if (usHost != null && usPort > 0) config = config with { UpstreamProxy = new UpstreamProxyConfig { Host = usHost, Port = usPort, Type = usType } };
+                    if (TryParseUpstream(value, out var upstreamRule))
+                        config = AddUpstreamRule(config, upstreamRules, upstreamRule);
                     break;
 
                 case "errorfile":
@@ -218,13 +234,11 @@ public sealed partial class ConfigParser
                     break;
 
                 case "addheader":
-                    // Format: AddHeader "Header-Name: Header-Value"
-                    var colonIndex = value.IndexOf(':');
-                    if (colonIndex > 0)
+                    // tinyproxy C syntax: AddHeader "Header-Name" "Header-Value"
+                    // Legacy compatibility: AddHeader "Header-Name: Header-Value"
+                    if (TryParseAddHeader(value, out var customHeader))
                     {
-                        var name = value.Substring(0, colonIndex).Trim();
-                        var headerValue = value.Substring(colonIndex + 1).Trim();
-                        customHeaders.Add(new HttpHeader { Name = name, Value = headerValue });
+                        customHeaders.Add(customHeader);
                         config = config with { CustomHeaders = new List<HttpHeader>(customHeaders) };
                     }
 
@@ -244,7 +258,8 @@ public sealed partial class ConfigParser
             BasicAuthUsers = basicAuthUsers,
             ReversePaths = reversePaths,
             CustomErrorPages = customErrorPages,
-            CustomHeaders = customHeaders
+            CustomHeaders = customHeaders,
+            UpstreamProxyRules = upstreamRules
         };
 
         return config;
@@ -267,17 +282,46 @@ public sealed partial class ConfigParser
         }
     }
 
-    private static void ParseReverseProxy(string value, out string? path, out string? url)
+    private static Configuration AddReversePath(
+        Configuration config,
+        List<ReversePathConfig> reversePaths,
+        ReversePathConfig reversePath)
     {
-        path = null;
-        url = null;
+        // Align with tinyproxy C's reversepath_add: newer rules are prepended.
+        reversePaths.Insert(0, reversePath);
+        return config with { IsReverseProxyEnabled = true };
+    }
 
-        var spaceIndex = value.IndexOf(' ');
-        if (spaceIndex > 0)
-        {
-            path = value.Substring(0, spaceIndex);
-            url = value.Substring(spaceIndex + 1).Trim();
-        }
+    private static bool TryParseReversePath(string value, out ReversePathConfig reversePath)
+    {
+        reversePath = default!;
+
+        var tokens = TokenizeArguments(value);
+        if (tokens.Count == 0 || tokens.Count > 2) return false;
+
+        var path = tokens.Count == 1 ? "/" : tokens[0];
+        var url = tokens.Count == 1 ? tokens[0] : tokens[1];
+
+        if (string.IsNullOrWhiteSpace(path) ||
+            string.IsNullOrWhiteSpace(url) ||
+            !url.Contains("://", StringComparison.Ordinal))
+            return false;
+
+        if (!TryNormalizeReversePath(path, out var normalizedPath)) return false;
+
+        reversePath = new ReversePathConfig { Path = normalizedPath, Url = url };
+        return true;
+    }
+
+    private static bool TryNormalizeReversePath(string path, out string normalizedPath)
+    {
+        normalizedPath = string.Empty;
+
+        var trimmed = path.Trim();
+        if (!trimmed.StartsWith('/')) return false;
+
+        normalizedPath = trimmed.EndsWith('/') ? trimmed : $"{trimmed}/";
+        return true;
     }
 
     private static void ParseBasicAuth(string value, out string? username, out string? password)
@@ -304,36 +348,182 @@ public sealed partial class ConfigParser
         }
     }
 
-    private static void ParseUpstream(string value, out string? host, out ushort port, out UpstreamProxyType type)
+    private static Configuration AddUpstreamRule(
+        Configuration config,
+        List<UpstreamProxyRuleConfig> rules,
+        UpstreamProxyRuleConfig rule)
     {
-        host = null;
-        port = 0;
-        type = UpstreamProxyType.Http;
+        if (rule.Domain == null)
+        {
+            // Align with tinyproxy C's duplicate default upstream behavior: keep the first default rule.
+            if (rules.Any(r => r.Domain == null)) return config;
 
-        // Parse "http://host:port" or "socks5://host:port"
-        var url = value.Trim();
-        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            rules.Add(rule);
+
+            if (rule.Proxy != null)
+                return config with { UpstreamProxy = rule.Proxy };
+
+            return config;
+        }
+
+        // Align with tinyproxy C's upstream_add: domain-specific rules are prepended.
+        rules.Insert(0, rule);
+        return config;
+    }
+
+    private static bool TryParseUpstream(string value, out UpstreamProxyRuleConfig rule)
+    {
+        rule = new UpstreamProxyRuleConfig();
+
+        var tokens = TokenizeArguments(value);
+        if (tokens.Count == 0) return false;
+
+        // tinyproxy C syntax: Upstream none <domain>
+        if (tokens[0].Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            if (tokens.Count < 2 || string.IsNullOrWhiteSpace(tokens[1])) return false;
+            rule = new UpstreamProxyRuleConfig { Domain = tokens[1], Proxy = null };
+            return true;
+        }
+
+        var type = UpstreamProxyType.Http;
+        var index = 0;
+
+        if (tokens[index].Equals("http", StringComparison.OrdinalIgnoreCase))
         {
             type = UpstreamProxyType.Http;
-            url = url.Substring(7);
+            index++;
         }
-        else if (url.StartsWith("socks4://", StringComparison.OrdinalIgnoreCase))
+        else if (tokens[index].Equals("socks4", StringComparison.OrdinalIgnoreCase))
         {
             type = UpstreamProxyType.Socks4;
-            url = url.Substring(9);
+            index++;
         }
-        else if (url.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
+        else if (tokens[index].Equals("socks5", StringComparison.OrdinalIgnoreCase))
         {
             type = UpstreamProxyType.Socks5;
-            url = url.Substring(9);
+            index++;
         }
 
-        var colonIndex = url.LastIndexOf(':');
-        if (colonIndex > 0)
+        if (index >= tokens.Count) return false;
+
+        var endpointToken = tokens[index++];
+        string? domain = null;
+        if (index < tokens.Count && !string.IsNullOrWhiteSpace(tokens[index]))
+            domain = tokens[index];
+
+        if (TryStripScheme(endpointToken, out var schemeType, out var strippedEndpoint))
         {
-            host = url.Substring(0, colonIndex);
-            if (ushort.TryParse(url.Substring(colonIndex + 1), out var p)) port = p;
+            type = schemeType;
+            endpointToken = strippedEndpoint;
         }
+
+        if (!TryParseUpstreamEndpoint(endpointToken, out var host, out var port, out var username, out var password))
+            return false;
+
+        rule = new UpstreamProxyRuleConfig
+        {
+            Domain = domain,
+            Proxy = new UpstreamProxyConfig
+            {
+                Host = host,
+                Port = port,
+                Type = type,
+                Username = username,
+                Password = password,
+                Domain = domain
+            }
+        };
+
+        return true;
+    }
+
+    private static bool TryStripScheme(string endpointToken, out UpstreamProxyType type, out string stripped)
+    {
+        type = UpstreamProxyType.Http;
+        stripped = endpointToken;
+
+        if (endpointToken.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            type = UpstreamProxyType.Http;
+            stripped = endpointToken.Substring(7);
+            return true;
+        }
+
+        if (endpointToken.StartsWith("socks4://", StringComparison.OrdinalIgnoreCase))
+        {
+            type = UpstreamProxyType.Socks4;
+            stripped = endpointToken.Substring(9);
+            return true;
+        }
+
+        if (endpointToken.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
+        {
+            type = UpstreamProxyType.Socks5;
+            stripped = endpointToken.Substring(9);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseUpstreamEndpoint(
+        string endpointToken,
+        out string host,
+        out ushort port,
+        out string? username,
+        out string? password)
+    {
+        host = string.Empty;
+        port = 0;
+        username = null;
+        password = null;
+
+        if (string.IsNullOrWhiteSpace(endpointToken)) return false;
+
+        var hostPortToken = endpointToken;
+        var atIndex = endpointToken.LastIndexOf('@');
+        if (atIndex > 0)
+        {
+            var credentials = endpointToken.Substring(0, atIndex);
+            hostPortToken = endpointToken.Substring(atIndex + 1);
+
+            var colonInCredentials = credentials.IndexOf(':');
+            if (colonInCredentials <= 0 || colonInCredentials >= credentials.Length - 1) return false;
+            username = credentials.Substring(0, colonInCredentials);
+            password = credentials.Substring(colonInCredentials + 1);
+        }
+
+        if (!TryParseHostAndPort(hostPortToken, out host, out port))
+            return false;
+
+        return !string.IsNullOrEmpty(host) && port > 0;
+    }
+
+    private static bool TryParseHostAndPort(string input, out string host, out ushort port)
+    {
+        host = string.Empty;
+        port = 0;
+
+        if (string.IsNullOrWhiteSpace(input)) return false;
+
+        var span = input.AsSpan().Trim();
+
+        if (span.Length > 0 && span[0] == '[')
+        {
+            var closeBracketIndex = span.IndexOf(']');
+            if (closeBracketIndex <= 1 || closeBracketIndex >= span.Length - 1) return false;
+            if (span[closeBracketIndex + 1] != ':') return false;
+
+            host = span[1..closeBracketIndex].ToString();
+            return ushort.TryParse(span[(closeBracketIndex + 2)..], out port) && !string.IsNullOrWhiteSpace(host);
+        }
+
+        var colonIndex = span.LastIndexOf(':');
+        if (colonIndex <= 0 || colonIndex >= span.Length - 1) return false;
+
+        host = span[..colonIndex].ToString();
+        return ushort.TryParse(span[(colonIndex + 1)..], out port) && !string.IsNullOrWhiteSpace(host);
     }
 
     public static Configuration LoadFromFile(string path)
@@ -365,6 +555,17 @@ public sealed partial class ConfigParser
             default:
                 return bool.TryParse(value, out result);
         }
+    }
+
+    private static string NormalizeDirectiveValue(string rawValue)
+    {
+        var trimmed = rawValue.Trim();
+
+        if (trimmed.Length < 2 || trimmed[0] != '"' || trimmed[^1] != '"')
+            return trimmed;
+
+        var hasNestedQuotes = trimmed[1..^1].IndexOf('"') >= 0;
+        return hasNestedQuotes ? trimmed : trimmed[1..^1];
     }
 
     /// <summary>
@@ -422,6 +623,44 @@ public sealed partial class ConfigParser
         }
 
         return result;
+    }
+
+    private static bool TryParseAddHeader(string value, out HttpHeader header)
+    {
+        header = default!;
+
+        var trimmed = value.Trim();
+        var tokens = TokenizeArguments(trimmed);
+        if (tokens.Count >= 2 &&
+            !tokens[0].Contains(':', StringComparison.Ordinal) &&
+            !string.Equals(tokens[1], ":", StringComparison.Ordinal))
+        {
+            var headerName = tokens[0].Trim();
+            var headerValue = string.Join(' ', tokens.Skip(1)).Trim();
+
+            if (headerName.Length == 0 || headerValue.Length == 0) return false;
+
+            header = new HttpHeader
+            {
+                Name = headerName,
+                Value = headerValue
+            };
+            return true;
+        }
+
+        var colonIndex = trimmed.IndexOf(':');
+        if (colonIndex <= 0 || colonIndex >= trimmed.Length - 1) return false;
+
+        var legacyName = trimmed.Substring(0, colonIndex).Trim();
+        var legacyValue = trimmed.Substring(colonIndex + 1).Trim();
+        if (legacyName.Length == 0 || legacyValue.Length == 0) return false;
+
+        header = new HttpHeader
+        {
+            Name = legacyName,
+            Value = legacyValue
+        };
+        return true;
     }
 
     [GeneratedRegex(@"^\s*#.*$")]

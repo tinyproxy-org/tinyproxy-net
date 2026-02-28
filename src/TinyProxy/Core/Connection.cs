@@ -158,6 +158,18 @@ public sealed class Connection : IDisposable
                 var reverseProxy = new Protocol.ReverseProxy(_logger, _config, _stats, _accessLogger, _clientIp);
                 var handled = await reverseProxy.TryHandleAsync(this, firstRequest, token);
                 if (handled) return;
+
+                if (_config.ReverseOnly)
+                {
+                    _logger.LogWarning($"ReverseOnly reject for unmapped URL: {firstRequest.Uri}");
+                    _stats.IncrementFailedRequests();
+                    await Protocol.HtmlErrorPages.BadRequestAsync(
+                        _clientSocket,
+                        "No mapping found for requested url",
+                        token);
+                    LogAccess(firstRequest, 400, 0);
+                    return;
+                }
             }
 
             // Check if this is a transparent proxy request

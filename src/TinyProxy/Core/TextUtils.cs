@@ -158,7 +158,7 @@ public static class TextUtils
 
         // Aligns with tinyproxy C's strip_username_password():
         // remove optional userinfo prefix before host parsing.
-        var atIndex = input.LastIndexOf('@');
+        var atIndex = input.IndexOf('@');
         if (atIndex >= 0)
         {
             if (atIndex + 1 >= input.Length) return false;

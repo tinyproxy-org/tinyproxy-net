@@ -103,6 +103,13 @@ public sealed record Configuration
     public UpstreamProxyConfig? UpstreamProxy { get; init; }
 
     /// <summary>
+    /// Gets ordered upstream proxy rules.
+    /// Rules are evaluated in list order and may include bypass ("none") entries.
+    /// Aligns with tinyproxy C's upstream list and upstream_get() matching order.
+    /// </summary>
+    public List<UpstreamProxyRuleConfig> UpstreamProxyRules { get; init; } = new();
+
+    /// <summary>
     /// Gets the log file path.
     /// </summary>
     public string? LogFile { get; init; }
@@ -174,6 +181,12 @@ public sealed record Configuration
     /// Aligns with tinyproxy C's REVERSE_SUPPORT.
     /// </summary>
     public bool IsReverseProxyEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Gets whether requests without reverse mappings should be rejected.
+    /// Aligns with tinyproxy C's reverseonly option.
+    /// </summary>
+    public bool ReverseOnly { get; init; } = false;
 
     /// <summary>
     /// Gets the reverse proxy path mappings.
@@ -261,6 +274,134 @@ public sealed record Configuration
     public List<HttpHeader> CustomHeaders { get; init; } = new();
 
     /// <summary>
+    /// Gets whether any upstream proxy configuration exists.
+    /// </summary>
+    public bool HasUpstreamProxyConfigured => UpstreamProxyRules.Count > 0 || UpstreamProxy != null;
+
+    /// <summary>
+    /// Resolves the effective upstream proxy for a target host.
+    /// Returns null when traffic should bypass upstream (including "none" rules).
+    /// </summary>
+    public UpstreamProxyConfig? ResolveUpstreamProxy(string targetHost)
+    {
+        if (UpstreamProxyRules.Count == 0) return UpstreamProxy;
+
+        var normalizedHost = NormalizeMatchHost(targetHost);
+
+        foreach (var rule in UpstreamProxyRules)
+        {
+            if (!RuleMatchesHost(rule.Domain, normalizedHost)) continue;
+            return rule.Proxy;
+        }
+
+        return null;
+    }
+
+    private static string NormalizeMatchHost(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return string.Empty;
+
+        var span = host.AsSpan().Trim();
+        if (span.Length >= 2 && span[0] == '[' && span[^1] == ']')
+            span = span[1..^1];
+
+        return span.ToString();
+    }
+
+    private static bool RuleMatchesHost(string? domainRule, string host)
+    {
+        if (string.IsNullOrEmpty(domainRule)) return true;
+        if (string.IsNullOrEmpty(host)) return false;
+
+        if (TryParseNetworkRule(domainRule, out var network, out var prefixLength))
+        {
+            if (!IPAddress.TryParse(host, out var ipAddress)) return false;
+            return IsInCidr(ipAddress, network, prefixLength);
+        }
+
+        if (domainRule[0] == '.')
+            return host.EndsWith(domainRule, StringComparison.OrdinalIgnoreCase);
+
+        return string.Equals(host, domainRule, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseNetworkRule(string value, out IPAddress network, out int prefixLength)
+    {
+        network = IPAddress.None;
+        prefixLength = 0;
+
+        var slashIndex = value.IndexOf('/');
+        if (slashIndex <= 0 || slashIndex >= value.Length - 1) return false;
+
+        var networkPart = value.Substring(0, slashIndex);
+        var maskPart = value.Substring(slashIndex + 1);
+
+        if (!IPAddress.TryParse(networkPart, out var parsedNetwork) || parsedNetwork is null) return false;
+        network = parsedNetwork;
+
+        if (int.TryParse(maskPart, out var parsedPrefix))
+        {
+            var maxBits = network.AddressFamily == AddressFamily.InterNetwork ? 32 : 128;
+            if (parsedPrefix < 0 || parsedPrefix > maxBits) return false;
+            prefixLength = parsedPrefix;
+            return true;
+        }
+
+        if (!IPAddress.TryParse(maskPart, out var maskAddress) || maskAddress is null) return false;
+        if (maskAddress.AddressFamily != network.AddressFamily) return false;
+
+        return TryGetPrefixLengthFromMask(maskAddress, out prefixLength);
+    }
+
+    private static bool TryGetPrefixLengthFromMask(IPAddress maskAddress, out int prefixLength)
+    {
+        prefixLength = 0;
+        var bytes = maskAddress.GetAddressBytes();
+        var seenZero = false;
+
+        foreach (var b in bytes)
+        {
+            for (var bit = 7; bit >= 0; bit--)
+            {
+                var isSet = (b & (1 << bit)) != 0;
+                if (isSet)
+                {
+                    if (seenZero) return false;
+                    prefixLength++;
+                }
+                else
+                {
+                    seenZero = true;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsInCidr(IPAddress address, IPAddress network, int prefixLength)
+    {
+        if (address.AddressFamily != network.AddressFamily) return false;
+
+        var addressBytes = address.GetAddressBytes();
+        var networkBytes = network.GetAddressBytes();
+        if (addressBytes.Length != networkBytes.Length) return false;
+
+        var fullBytes = prefixLength / 8;
+        var partialBits = prefixLength % 8;
+
+        for (var i = 0; i < fullBytes; i++)
+        {
+            if (addressBytes[i] != networkBytes[i]) return false;
+        }
+
+        if (partialBits == 0 || fullBytes >= addressBytes.Length) return true;
+
+        var mask = (byte)(0xFF << (8 - partialBits));
+        return (addressBytes[fullBytes] & mask) == (networkBytes[fullBytes] & mask);
+    }
+
+    /// <summary>
     /// Creates a default configuration.
     /// </summary>
     public static Configuration Default => new();
@@ -316,6 +457,24 @@ public sealed record UpstreamProxyConfig
     /// Aligns with tinyproxy C's upstream->target (hostspec).
     /// </summary>
     public string? Domain { get; init; }
+}
+
+/// <summary>
+/// Ordered upstream routing rule.
+/// When Proxy is null, requests matching Domain bypass upstream.
+/// </summary>
+public sealed record UpstreamProxyRuleConfig
+{
+    /// <summary>
+    /// Gets the domain/hostspec matcher. Null means default rule.
+    /// </summary>
+    public string? Domain { get; init; }
+
+    /// <summary>
+    /// Gets the upstream proxy to use for this rule.
+    /// Null means "upstream none" (bypass).
+    /// </summary>
+    public UpstreamProxyConfig? Proxy { get; init; }
 }
 
 /// <summary>
