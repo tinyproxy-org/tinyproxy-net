@@ -22,7 +22,12 @@ public sealed class SocksUpstreamProxy
     /// <summary>
     /// Connects to the target host through the SOCKS proxy.
     /// </summary>
-    public async ValueTask<Socket> ConnectAsync(string targetHost, int targetPort, CancellationToken token)
+    public async ValueTask<Socket> ConnectAsync(
+        string targetHost,
+        int targetPort,
+        CancellationToken token,
+        Socket? clientSocket = null,
+        Configuration? bindConfig = null)
     {
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
 
@@ -32,7 +37,29 @@ public sealed class SocksUpstreamProxy
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
             cts.CancelAfter(_timeout);
 
-            await socket.ConnectAsync(_config.Host, _config.Port, cts.Token).ConfigureAwait(false);
+            if (clientSocket != null && bindConfig != null)
+                socket.BindToSameIp(clientSocket, bindConfig);
+            if (bindConfig != null && bindConfig.BindAddresses.Count > 0)
+            {
+                var bindAddress = bindConfig.BindAddresses.FirstOrDefault();
+                if (!string.IsNullOrEmpty(bindAddress))
+                {
+                    await socket.ConnectAndBindAsync(
+                        _config.Host,
+                        _config.Port,
+                        _timeout,
+                        bindAddress,
+                        cts.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    await socket.ConnectAsync(_config.Host, _config.Port, cts.Token).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await socket.ConnectAsync(_config.Host, _config.Port, cts.Token).ConfigureAwait(false);
+            }
 
             // Perform SOCKS handshake based on type
             if (_config.Type == UpstreamProxyType.Socks4)
@@ -51,6 +78,11 @@ public sealed class SocksUpstreamProxy
         {
             socket.Dispose();
             throw new TimeoutException($"SOCKS proxy connection timed out after {_timeout}", ex);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
         }
     }
 

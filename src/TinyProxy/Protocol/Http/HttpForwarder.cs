@@ -82,6 +82,7 @@ public sealed class HttpForwarder
         var upstream = _config.ResolveUpstreamProxy(host);
         Socket serverSocket = null!;
         long bytesReceived = 0;
+        IdleTimeoutScope? requestIdleTimeoutScope = null;
 
         try
         {
@@ -114,14 +115,22 @@ public sealed class HttpForwarder
 
             Connected:
             RecordPotentialLoopEndpoint(serverSocket, port);
+            requestIdleTimeoutScope = new IdleTimeoutScope(_config.Timeout, token);
+            var requestIoToken = requestIdleTimeoutScope.Token;
 
             // Build modified request
             var useAbsoluteUri = upstream?.Type == UpstreamProxyType.Http;
             var requestBuffer = BuildForwardRequest(request, host, port, useAbsoluteUri);
-            await serverSocket.SendAllAsync(requestBuffer, token).ConfigureAwait(false);
+            await serverSocket.SendAllAsync(requestBuffer, requestIoToken).ConfigureAwait(false);
+            requestIdleTimeoutScope.Touch();
 
             // Forward request body (pre-read bytes + remaining bytes from client socket).
-            await ForwardRequestBodyAsync(connection.ClientSocket, serverSocket, request, token).ConfigureAwait(false);
+            await ForwardRequestBodyAsync(
+                connection.ClientSocket,
+                serverSocket,
+                request,
+                requestIoToken,
+                requestIdleTimeoutScope.Touch).ConfigureAwait(false);
 
             // Read response from server and forward to client
             (bytesSent, bytesReceived) = await ForwardResponseAsync(
@@ -174,7 +183,61 @@ public sealed class HttpForwarder
                     token).ConfigureAwait(false);
             }
         }
+        catch (ResponseForwardingTimeoutException ex)
+        {
+            _stats.IncrementFailedRequests();
+            if (upstream == null)
+            {
+                statusCode = 500;
+                if (!ex.ResponseStarted)
+                {
+                    await SendErrorAsync(
+                        connection.ClientSocket,
+                        500,
+                        "Internal Server Error",
+                        "Server response timeout",
+                        token).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                statusCode = 504;
+                if (!ex.ResponseStarted)
+                {
+                    await SendErrorAsync(
+                        connection.ClientSocket,
+                        504,
+                        "Gateway Timeout",
+                        "Server response timeout",
+                        token).ConfigureAwait(false);
+                }
+            }
+        }
         catch (TimeoutException)
+        {
+            _stats.IncrementFailedRequests();
+            if (upstream == null)
+            {
+                statusCode = 500;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    500,
+                    "Internal Server Error",
+                    "Server response timeout",
+                    token).ConfigureAwait(false);
+            }
+            else
+            {
+                statusCode = 504;
+                await SendErrorAsync(
+                    connection.ClientSocket,
+                    504,
+                    "Gateway Timeout",
+                    "Server response timeout",
+                    token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (requestIdleTimeoutScope?.IsTimeoutCancellation == true)
         {
             _stats.IncrementFailedRequests();
             if (upstream == null)
@@ -232,6 +295,8 @@ public sealed class HttpForwarder
         }
         finally
         {
+            requestIdleTimeoutScope?.Dispose();
+
             // Always dispose server socket
             try
             {
@@ -257,7 +322,7 @@ public sealed class HttpForwarder
         if (upstream.Type == UpstreamProxyType.Socks4 || upstream.Type == UpstreamProxyType.Socks5)
         {
             var socksProxy = new SocksUpstreamProxy(_logger, upstream, _config.Timeout);
-            return await socksProxy.ConnectAsync(targetHost, targetPort, token).ConfigureAwait(false);
+            return await socksProxy.ConnectAsync(targetHost, targetPort, token, clientSocket, _config).ConfigureAwait(false);
         }
 
         // HTTP upstream proxy
@@ -316,7 +381,6 @@ public sealed class HttpForwarder
             var hopByHopHeaders = ProxyConstants.HopByHopHeadersSet;
             var connectionTokenHeaders = ExtractConnectionTokenHeaders(request);
             string? upstreamViaHeader = null;
-            var preserveClientProxyAuthorization = !IsLocalBasicAuthEnabled();
 
             // Apply anonymous filter if enabled (aligns with tinyproxy C's anonymous.c)
             var anonymousFilter = new AnonymousFilter(_config.AnonymousAllowedHeaders);
@@ -325,9 +389,7 @@ public sealed class HttpForwarder
             {
                 // Skip hop-by-hop headers
                 // Keep Transfer-Encoding for request-body semantics (e.g. chunked).
-                var isProxyAuthorization = string.Equals(name, "Proxy-Authorization", StringComparison.OrdinalIgnoreCase);
-                if ((!isProxyAuthorization || !preserveClientProxyAuthorization) &&
-                    !string.Equals(name, "Transfer-Encoding", StringComparison.OrdinalIgnoreCase) &&
+                if (!string.Equals(name, "Transfer-Encoding", StringComparison.OrdinalIgnoreCase) &&
                     hopByHopHeaders.Contains(name))
                     return;
 
@@ -404,6 +466,13 @@ public sealed class HttpForwarder
             // Aligns with tinyproxy C's add_headers functionality
             foreach (var header in _config.CustomHeaders)
             {
+                if (connectionTokenHeaders.Contains(header.Name))
+                    continue;
+
+                if (hopByHopHeaders.Contains(header.Name) ||
+                    string.Equals(header.Name, "Host", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
                 if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(header.Name))
                     continue;
 
@@ -422,16 +491,12 @@ public sealed class HttpForwarder
         }
     }
 
-    private bool IsLocalBasicAuthEnabled()
-    {
-        return _config.BasicAuth != null || _config.BasicAuthUsers.Count > 0;
-    }
-
     private static async ValueTask<long> SendBodyAsync(
         Socket socket,
         ReadOnlySequence<byte> body,
         long maxBytes,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         if (maxBytes <= 0 || body.Length == 0) return 0;
 
@@ -445,6 +510,7 @@ public sealed class HttpForwarder
             if (toSend <= 0) break;
 
             await socket.SendAllAsync(segment.Slice(0, toSend), token).ConfigureAwait(false);
+            onActivity?.Invoke();
             sent += toSend;
         }
 
@@ -519,7 +585,8 @@ public sealed class HttpForwarder
         Socket clientSocket,
         Socket serverSocket,
         HttpRequest request,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         // tinyproxy C behavior (reqs.c): Content-Length takes precedence over chunked.
         if (request.ContentLength.HasValue)
@@ -527,7 +594,7 @@ public sealed class HttpForwarder
             if (request.ContentLength.Value <= 0) return;
 
             var contentLength = request.ContentLength.Value;
-            var sentFromBuffer = await SendBodyAsync(serverSocket, request.Body, contentLength, token).ConfigureAwait(false);
+            var sentFromBuffer = await SendBodyAsync(serverSocket, request.Body, contentLength, token, onActivity).ConfigureAwait(false);
             var remainingBytes = contentLength - sentFromBuffer;
 
             if (remainingBytes <= 0) return;
@@ -536,19 +603,21 @@ public sealed class HttpForwarder
                 clientSocket,
                 serverSocket,
                 remainingBytes,
-                token).ConfigureAwait(false);
+                token,
+                onActivity).ConfigureAwait(false);
             return;
         }
 
         if (HasChunkedTransferEncoding(request))
-            await ForwardChunkedBodyAsync(clientSocket, serverSocket, request.Body, token).ConfigureAwait(false);
+            await ForwardChunkedBodyAsync(clientSocket, serverSocket, request.Body, token, onActivity).ConfigureAwait(false);
     }
 
     private async ValueTask ForwardChunkedBodyAsync(
         Socket clientSocket,
         Socket serverSocket,
         ReadOnlySequence<byte> prefetchedBody,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         var reader = new PrebufferedSocketReader(clientSocket, prefetchedBody);
         var lineBuffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.InitialHeaderBufferSize);
@@ -559,13 +628,14 @@ public sealed class HttpForwarder
         {
             while (true)
             {
-                var lineLength = await ReadLineAsync(reader, lineBuffer, token).ConfigureAwait(false);
+                var lineLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
                 await serverSocket.SendAllAsync(lineBuffer.AsMemory(0, lineLength), token).ConfigureAwait(false);
+                onActivity?.Invoke();
 
                 var chunkSize = ParseChunkSize(lineBuffer.AsMemory(0, lineLength));
                 if (chunkSize == 0)
                 {
-                    await ForwardChunkTrailersAsync(reader, serverSocket, lineBuffer, token).ConfigureAwait(false);
+                    await ForwardChunkTrailersAsync(reader, serverSocket, lineBuffer, token, onActivity).ConfigureAwait(false);
                     break;
                 }
 
@@ -574,13 +644,14 @@ public sealed class HttpForwarder
                     throw new RequestBodyTooLargeException();
 
                 // Forward chunk payload.
-                await CopyExactlyAsync(reader, serverSocket, copyBuffer, chunkSize, token).ConfigureAwait(false);
+                await CopyExactlyAsync(reader, serverSocket, copyBuffer, chunkSize, token, onActivity).ConfigureAwait(false);
 
                 // Forward and validate chunk terminator (CRLF or LF).
-                var chunkTerminatorLength = await ReadLineAsync(reader, lineBuffer, token).ConfigureAwait(false);
+                var chunkTerminatorLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
                 if (!IsEmptyLine(lineBuffer, chunkTerminatorLength))
                     throw new InvalidOperationException("Invalid chunk terminator.");
                 await serverSocket.SendAllAsync(lineBuffer.AsMemory(0, chunkTerminatorLength), token).ConfigureAwait(false);
+                onActivity?.Invoke();
             }
         }
         finally
@@ -601,13 +672,15 @@ public sealed class HttpForwarder
     private static async ValueTask<int> ReadLineAsync(
         PrebufferedSocketReader reader,
         byte[] lineBuffer,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         var length = 0;
         while (length < lineBuffer.Length)
         {
             var read = await reader.ReadAsync(lineBuffer.AsMemory(length, 1), token).ConfigureAwait(false);
             if (read == 0) throw new InvalidOperationException("Connection closed while reading chunked body.");
+            onActivity?.Invoke();
             length += read;
 
             if (lineBuffer[length - 1] == (byte)'\n')
@@ -643,12 +716,14 @@ public sealed class HttpForwarder
         PrebufferedSocketReader reader,
         Socket serverSocket,
         byte[] lineBuffer,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         while (true)
         {
-            var lineLength = await ReadLineAsync(reader, lineBuffer, token).ConfigureAwait(false);
+            var lineLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
             await serverSocket.SendAllAsync(lineBuffer.AsMemory(0, lineLength), token).ConfigureAwait(false);
+            onActivity?.Invoke();
 
             if (IsEmptyLine(lineBuffer, lineLength))
                 return;
@@ -668,15 +743,18 @@ public sealed class HttpForwarder
         Socket destination,
         byte[] buffer,
         long bytesToCopy,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         while (bytesToCopy > 0)
         {
             var toRead = (int)Math.Min(buffer.Length, bytesToCopy);
             var read = await reader.ReadAsync(buffer.AsMemory(0, toRead), token).ConfigureAwait(false);
             if (read == 0) throw new InvalidOperationException("Connection closed while forwarding chunked body.");
+            onActivity?.Invoke();
 
             await destination.SendAllAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+            onActivity?.Invoke();
             bytesToCopy -= read;
         }
     }
@@ -685,7 +763,8 @@ public sealed class HttpForwarder
         Socket clientSocket,
         Socket serverSocket,
         long remainingBytes,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.StreamBufferSize);
         try
@@ -699,10 +778,12 @@ public sealed class HttpForwarder
                     token).ConfigureAwait(false);
 
                 if (received == 0) throw new InvalidOperationException("Client closed connection before sending complete request body.");
+                onActivity?.Invoke();
 
                 await serverSocket.SendAllAsync(
                     buffer.AsMemory(0, received),
                     token).ConfigureAwait(false);
+                onActivity?.Invoke();
 
                 remainingBytes -= received;
             }
@@ -725,6 +806,7 @@ public sealed class HttpForwarder
         string? reverseMagicCookiePath,
         CancellationToken token)
     {
+        using var idleTimeoutScope = new IdleTimeoutScope(_config.Timeout, token);
         var headerBuffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.InitialHeaderBufferSize);
         long totalSent = 0;
         long totalReceived = 0;
@@ -732,6 +814,7 @@ public sealed class HttpForwarder
         var interimResponsesForwarded = 0;
         var viaProtocolToken = GetViaProtocolToken(requestVersion);
         var omitResponseHeaders = IsHttp09Request(requestVersion);
+        var responseIoToken = idleTimeoutScope.Token;
 
         try
         {
@@ -757,8 +840,9 @@ public sealed class HttpForwarder
 
                     var received = await headerReader.ReadAsync(
                         headerBuffer.AsMemory(headerBuffered),
-                        token).ConfigureAwait(false);
+                        responseIoToken).ConfigureAwait(false);
                     if (received == 0) throw new InvalidOperationException("Connection closed while reading response headers.");
+                    idleTimeoutScope.Touch();
 
                     headerBuffered += received;
 
@@ -781,7 +865,8 @@ public sealed class HttpForwarder
                     _config.ReverseMagicEnabled ? reverseMagicCookiePath : null);
                 if (!omitResponseHeaders)
                 {
-                    await client.SendAllAsync(sanitizedHeader, token).ConfigureAwait(false);
+                    await client.SendAllAsync(sanitizedHeader, responseIoToken).ConfigureAwait(false);
+                    idleTimeoutScope.Touch();
                     totalSent += sanitizedHeader.Length;
                 }
 
@@ -810,7 +895,8 @@ public sealed class HttpForwarder
                     case ResponseBodyMode.None:
                         if (!prefetchedBody.IsEmpty)
                         {
-                            await client.SendAllAsync(prefetchedBody, token).ConfigureAwait(false);
+                            await client.SendAllAsync(prefetchedBody, responseIoToken).ConfigureAwait(false);
+                            idleTimeoutScope.Touch();
                             totalSent += prefetchedBody.Length;
                         }
 
@@ -825,7 +911,8 @@ public sealed class HttpForwarder
                                 client,
                                 buffer,
                                 contentLength ?? 0,
-                                token).ConfigureAwait(false);
+                                responseIoToken,
+                                idleTimeoutScope.Touch).ConfigureAwait(false);
                         }
                         finally
                         {
@@ -845,7 +932,8 @@ public sealed class HttpForwarder
                                 client,
                                 lineBuffer,
                                 copyBuffer,
-                                token).ConfigureAwait(false);
+                                responseIoToken,
+                                idleTimeoutScope.Touch).ConfigureAwait(false);
                         }
                         finally
                         {
@@ -864,11 +952,34 @@ public sealed class HttpForwarder
                                 reader,
                                 client,
                                 buffer,
-                                token).ConfigureAwait(false);
+                                responseIoToken,
+                                idleTimeoutScope.Touch).ConfigureAwait(false);
                         }
                         finally
                         {
                             ArrayPool<byte>.Shared.Return(buffer);
+                        }
+
+                        break;
+                    }
+                    case ResponseBodyMode.UpgradedTunnel:
+                    {
+                        var serverToClientBuffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.DefaultBufferSize);
+                        var clientToServerBuffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.DefaultBufferSize);
+                        try
+                        {
+                            totalSent += await ForwardUpgradedTunnelAsync(
+                                reader,
+                                server,
+                                client,
+                                serverToClientBuffer,
+                                clientToServerBuffer,
+                                token).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(serverToClientBuffer);
+                            ArrayPool<byte>.Shared.Return(clientToServerBuffer);
                         }
 
                         break;
@@ -881,10 +992,93 @@ public sealed class HttpForwarder
                 return (totalSent, totalReceived);
             }
         }
+        catch (OperationCanceledException) when (idleTimeoutScope.IsTimeoutCancellation)
+        {
+            throw new ResponseForwardingTimeoutException(totalSent > 0);
+        }
         finally
         {
             ArrayPool<byte>.Shared.Return(headerBuffer);
         }
+    }
+
+    private async Task<long> ForwardUpgradedTunnelAsync(
+        PrebufferedSocketReader serverReader,
+        Socket server,
+        Socket client,
+        byte[] serverToClientBuffer,
+        byte[] clientToServerBuffer,
+        CancellationToken token)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var idleTimeout = _config.ConnectIdleTimeout;
+        var idleTimeoutSync = idleTimeout > TimeSpan.Zero ? new object() : null;
+
+        void TouchIdleTimeout()
+        {
+            if (idleTimeout <= TimeSpan.Zero || idleTimeoutSync == null) return;
+
+            lock (idleTimeoutSync)
+            {
+                if (!cts.IsCancellationRequested)
+                    cts.CancelAfter(idleTimeout);
+            }
+        }
+
+        TouchIdleTimeout();
+
+        var serverToClient = ForwardUntilCloseAsync(
+            serverReader,
+            client,
+            serverToClientBuffer,
+            cts.Token,
+            TouchIdleTimeout).AsTask();
+        var clientToServer = ForwardSocketUntilCloseAsync(
+            client,
+            server,
+            clientToServerBuffer,
+            cts.Token,
+            TouchIdleTimeout).AsTask();
+
+        try
+        {
+            await Task.WhenAll(serverToClient, clientToServer).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            // Ignore idle-timeout cancellation for upgraded relay.
+        }
+        catch (SocketException) when (!token.IsCancellationRequested)
+        {
+            // Ignore peer relay socket shutdown races during upgrade teardown.
+        }
+        catch (ObjectDisposedException) when (!token.IsCancellationRequested)
+        {
+            // Ignore peer relay socket disposal races during upgrade teardown.
+        }
+
+        try
+        {
+            server.Shutdown(SocketShutdown.Send);
+        }
+        catch
+        {
+            // Ignore shutdown errors for closed sockets.
+        }
+
+        try
+        {
+            client.Shutdown(SocketShutdown.Send);
+        }
+        catch
+        {
+            // Ignore shutdown errors for closed sockets.
+        }
+
+        if (serverToClient.Status == TaskStatus.RanToCompletion)
+            return serverToClient.Result;
+
+        return 0;
     }
 
     private static async ValueTask<long> ForwardFixedLengthBodyAsync(
@@ -892,7 +1086,8 @@ public sealed class HttpForwarder
         Socket destination,
         byte[] buffer,
         long contentLength,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         if (contentLength <= 0) return 0;
 
@@ -903,8 +1098,10 @@ public sealed class HttpForwarder
             var toRead = (int)Math.Min(buffer.Length, remaining);
             var read = await reader.ReadAsync(buffer.AsMemory(0, toRead), token).ConfigureAwait(false);
             if (read == 0) throw new InvalidOperationException("Connection closed before full response body was received.");
+            onActivity?.Invoke();
 
             await destination.SendAllAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+            onActivity?.Invoke();
             totalSent += read;
             remaining -= read;
         }
@@ -917,14 +1114,16 @@ public sealed class HttpForwarder
         Socket destination,
         byte[] lineBuffer,
         byte[] copyBuffer,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         long totalSent = 0;
 
         while (true)
         {
-            var chunkSizeLineLength = await ReadLineAsync(reader, lineBuffer, token).ConfigureAwait(false);
+            var chunkSizeLineLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
             await destination.SendAllAsync(lineBuffer.AsMemory(0, chunkSizeLineLength), token).ConfigureAwait(false);
+            onActivity?.Invoke();
             totalSent += chunkSizeLineLength;
 
             var chunkSize = ParseChunkSize(lineBuffer.AsMemory(0, chunkSizeLineLength));
@@ -932,20 +1131,22 @@ public sealed class HttpForwarder
             {
                 while (true)
                 {
-                    var trailerLength = await ReadLineAsync(reader, lineBuffer, token).ConfigureAwait(false);
+                    var trailerLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
                     await destination.SendAllAsync(lineBuffer.AsMemory(0, trailerLength), token).ConfigureAwait(false);
+                    onActivity?.Invoke();
                     totalSent += trailerLength;
                     if (IsEmptyLine(lineBuffer, trailerLength)) return totalSent;
                 }
             }
 
-            await CopyExactlyAsync(reader, destination, copyBuffer, chunkSize, token).ConfigureAwait(false);
+            await CopyExactlyAsync(reader, destination, copyBuffer, chunkSize, token, onActivity).ConfigureAwait(false);
             totalSent += chunkSize;
 
-            var chunkTerminatorLength = await ReadLineAsync(reader, lineBuffer, token).ConfigureAwait(false);
+            var chunkTerminatorLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
             if (!IsEmptyLine(lineBuffer, chunkTerminatorLength))
                 throw new InvalidOperationException("Invalid chunk terminator.");
             await destination.SendAllAsync(lineBuffer.AsMemory(0, chunkTerminatorLength), token).ConfigureAwait(false);
+            onActivity?.Invoke();
             totalSent += chunkTerminatorLength;
         }
     }
@@ -954,7 +1155,8 @@ public sealed class HttpForwarder
         PrebufferedSocketReader reader,
         Socket destination,
         byte[] buffer,
-        CancellationToken token)
+        CancellationToken token,
+        Action? onActivity = null)
     {
         long totalSent = 0;
         while (true)
@@ -964,6 +1166,30 @@ public sealed class HttpForwarder
 
             await destination.SendAllAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
             totalSent += read;
+            onActivity?.Invoke();
+
+            if (read > ProxyConstants.YieldThreshold) await Task.Yield();
+        }
+
+        return totalSent;
+    }
+
+    private static async ValueTask<long> ForwardSocketUntilCloseAsync(
+        Socket source,
+        Socket destination,
+        byte[] buffer,
+        CancellationToken token,
+        Action? onActivity = null)
+    {
+        long totalSent = 0;
+        while (true)
+        {
+            var read = await source.ReceiveAsync(buffer.AsMemory(), SocketFlags.None, token).ConfigureAwait(false);
+            if (read == 0) break;
+
+            await destination.SendAllAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+            totalSent += read;
+            onActivity?.Invoke();
 
             if (read > ProxyConstants.YieldThreshold) await Task.Yield();
         }
@@ -1406,7 +1632,7 @@ public sealed class HttpForwarder
         if (statusCode is 204 or 205 or 304) return ResponseBodyMode.None;
         if (statusCode >= 100 && statusCode < 200)
         {
-            if (statusCode == 101) return ResponseBodyMode.UntilClose;
+            if (statusCode == 101) return ResponseBodyMode.UpgradedTunnel;
             return ResponseBodyMode.None;
         }
         if (isChunked) return ResponseBodyMode.Chunked;
@@ -1687,7 +1913,8 @@ public sealed class HttpForwarder
         None,
         ContentLength,
         Chunked,
-        UntilClose
+        UntilClose,
+        UpgradedTunnel
     }
 
     private sealed class PrebufferedSocketReader
@@ -1721,6 +1948,17 @@ public sealed class HttpForwarder
             if (read > 0) _socketBytesRead += read;
             return read;
         }
+    }
+
+    private sealed class ResponseForwardingTimeoutException : TimeoutException
+    {
+        public ResponseForwardingTimeoutException(bool responseStarted)
+            : base("Server response timeout")
+        {
+            ResponseStarted = responseStarted;
+        }
+
+        public bool ResponseStarted { get; }
     }
 
     private sealed class RequestBodyTooLargeException : Exception;

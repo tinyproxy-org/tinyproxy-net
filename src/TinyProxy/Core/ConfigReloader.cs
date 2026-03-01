@@ -27,7 +27,7 @@ public sealed class ConfigReloader : IDisposable
         bool enableFileWatcher = true)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _configPath = configPath ?? throw new ArgumentNullException(nameof(configPath));
+        _configPath = Path.GetFullPath(configPath ?? throw new ArgumentNullException(nameof(configPath)));
         _reloadAction = reloadAction ?? throw new ArgumentNullException(nameof(reloadAction));
 
         if (!enableFileWatcher) return;
@@ -55,7 +55,7 @@ public sealed class ConfigReloader : IDisposable
             }
             else
             {
-                _logger.LogWarning($"Configuration hot-reload not available: cannot watch {configPath}");
+                _logger.LogWarning($"Configuration hot-reload not available: cannot watch {_configPath}");
             }
         }
         catch (Exception ex)

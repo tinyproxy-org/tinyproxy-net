@@ -79,9 +79,9 @@ public sealed class BasicAuth
         return _config.BasicAuth?.Realm ?? "TinyProxy";
     }
 
-    private void AddEncodedToken(string username, string password)
+    private void AddEncodedToken(string? username, string? password)
     {
-        if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)) return;
+        if (string.IsNullOrEmpty(username) || password == null) return;
 
         var raw = $"{username}:{password}";
         var token = Convert.ToBase64String(Encoding.UTF8.GetBytes(raw));

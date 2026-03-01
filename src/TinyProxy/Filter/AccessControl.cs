@@ -9,6 +9,7 @@ namespace TinyProxy.Filter;
 public sealed class AccessControl
 {
     private readonly List<AccessRule> _orderedRules;
+    private readonly bool _aclConfigured;
     private readonly ConcurrentDictionary<string, string> _dnsCache;
     private readonly ConcurrentDictionary<string, IPAddress[]> _dnsForwardCache;
 
@@ -17,6 +18,7 @@ public sealed class AccessControl
         ArgumentNullException.ThrowIfNull(config);
 
         _orderedRules = BuildOrderedRules(config);
+        _aclConfigured = HasConfiguredAclDirectives(config);
         _dnsCache = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         _dnsForwardCache = new ConcurrentDictionary<string, IPAddress[]>(StringComparer.OrdinalIgnoreCase);
     }
@@ -26,13 +28,17 @@ public sealed class AccessControl
     /// </summary>
     public bool IsAllowed(string clientIp)
     {
-        if (_orderedRules.Count == 0) return true;
+        if (_orderedRules.Count == 0) return !_aclConfigured;
 
         var isIpAddress = IPAddress.TryParse(clientIp, out var parsedIpAddress);
+        var normalizedParsedIp = isIpAddress && parsedIpAddress != null
+            ? NormalizeIpAddress(parsedIpAddress)
+            : null;
+        var candidate = normalizedParsedIp?.ToString() ?? clientIp;
 
         foreach (var rule in _orderedRules)
         {
-            if (!TryMatchRuleSync(rule, clientIp, parsedIpAddress, isIpAddress)) continue;
+            if (!TryMatchRuleSync(rule, candidate, normalizedParsedIp, isIpAddress)) continue;
             return rule.AccessType == AccessType.Allow;
         }
 
@@ -47,7 +53,7 @@ public sealed class AccessControl
     {
         if (endPoint is IPEndPoint ipEndPoint) return IsAllowed(ipEndPoint.Address.ToString());
 
-        return _orderedRules.Count == 0;
+        return _orderedRules.Count == 0 && !_aclConfigured;
     }
 
     /// <summary>
@@ -55,7 +61,7 @@ public sealed class AccessControl
     /// </summary>
     public async Task<bool> IsAllowedAsync(string hostname, CancellationToken cancellationToken = default)
     {
-        if (_orderedRules.Count == 0) return true;
+        if (_orderedRules.Count == 0) return !_aclConfigured;
 
         if (IPAddress.TryParse(hostname, out var ipAddress))
             return IsAllowed(ipAddress.ToString());
@@ -90,13 +96,14 @@ public sealed class AccessControl
         if (socket.RemoteEndPoint is IPEndPoint ipEndPoint)
             return await IsAllowedAsync(ipEndPoint.Address, ipEndPoint, cancellationToken).ConfigureAwait(false);
 
-        return _orderedRules.Count == 0;
+        return _orderedRules.Count == 0 && !_aclConfigured;
     }
 
     private async Task<bool> IsAllowedAsync(IPAddress ipAddress, IPEndPoint endPoint, CancellationToken cancellationToken)
     {
-        if (_orderedRules.Count == 0) return true;
+        if (_orderedRules.Count == 0) return !_aclConfigured;
 
+        ipAddress = NormalizeIpAddress(ipAddress);
         var ipString = ipAddress.ToString();
         string? hostname = null;
 
@@ -163,6 +170,11 @@ public sealed class AccessControl
         return rules;
     }
 
+    private static bool HasConfiguredAclDirectives(Configuration config)
+    {
+        return config.AccessRules.Count > 0 || config.AllowIPs.Count > 0 || config.DenyIPs.Count > 0;
+    }
+
     /// <summary>
     /// Parses configuration rules into AccessRule objects.
     /// </summary>
@@ -203,11 +215,23 @@ public sealed class AccessControl
             var ipPart = pattern.Substring(0, slashIndex);
             var prefixLength = pattern.Substring(slashIndex + 1);
             if (IPAddress.TryParse(ipPart, out var ipAddress) && int.TryParse(prefixLength, out var prefixLen))
-                return new AccessRule(RuleType.Cidr, pattern, accessType, ipAddress, prefixLen);
+            {
+                var normalized = NormalizeIpAddress(ipAddress);
+                var maxPrefixLength = normalized.AddressFamily == AddressFamily.InterNetwork ? 32 : 128;
+                if (prefixLen < 0 || prefixLen > maxPrefixLength)
+                    return null;
+
+                return new AccessRule(RuleType.Cidr, pattern, accessType, normalized, prefixLen);
+            }
+
+            return null;
         }
 
+        if (pattern.Contains('/'))
+            return null;
+
         if (IPAddress.TryParse(pattern, out var ip))
-            return new AccessRule(RuleType.Ip, pattern, accessType, ip);
+            return new AccessRule(RuleType.Ip, NormalizeIpAddress(ip).ToString(), accessType, NormalizeIpAddress(ip));
 
         return new AccessRule(RuleType.Domain, pattern, accessType);
     }
@@ -269,7 +293,7 @@ public sealed class AccessControl
 
         foreach (var address in addresses)
         {
-            if (address.Equals(ipAddress)) return true;
+            if (AreEquivalentIpAddresses(address, ipAddress)) return true;
         }
 
         return false;
@@ -293,7 +317,7 @@ public sealed class AccessControl
 
         foreach (var address in addresses)
         {
-            if (address.Equals(ipAddress)) return true;
+            if (AreEquivalentIpAddresses(address, ipAddress)) return true;
         }
 
         return false;
@@ -347,6 +371,9 @@ public sealed class AccessControl
     /// </summary>
     private static bool IsInSubnet(IPAddress ipAddress, IPAddress subnet, int prefixLength)
     {
+        ipAddress = NormalizeIpAddress(ipAddress);
+        subnet = NormalizeIpAddress(subnet);
+
         if (ipAddress.AddressFamily != subnet.AddressFamily)
             return false;
 
@@ -375,6 +402,19 @@ public sealed class AccessControl
         }
 
         return true;
+    }
+
+    private static IPAddress NormalizeIpAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+            return address.MapToIPv4();
+
+        return address;
+    }
+
+    private static bool AreEquivalentIpAddresses(IPAddress left, IPAddress right)
+    {
+        return NormalizeIpAddress(left).Equals(NormalizeIpAddress(right));
     }
 
     /// <summary>

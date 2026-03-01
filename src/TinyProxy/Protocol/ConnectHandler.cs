@@ -1,4 +1,5 @@
 using System.Buffers.Text;
+using System.Globalization;
 
 namespace TinyProxy.Protocol;
 
@@ -209,7 +210,68 @@ public sealed class ConnectHandler
 
     private static bool TryParseConnectTarget(string uri, out string host, out int port)
     {
-        return TextUtils.TryParseHostPort(uri, 443, out host, out port);
+        if (!TextUtils.TryParseHostPort(uri, 443, out host, out port))
+            return false;
+
+        if (!TryParseExplicitConnectPort(uri, out var hasExplicitPort, out var explicitPort))
+            return false;
+
+        if (hasExplicitPort)
+            port = explicitPort;
+
+        return true;
+    }
+
+    private static bool TryParseExplicitConnectPort(string uri, out bool hasExplicitPort, out int explicitPort)
+    {
+        hasExplicitPort = false;
+        explicitPort = 0;
+
+        if (string.IsNullOrWhiteSpace(uri)) return false;
+
+        var span = uri.AsSpan().Trim();
+
+        var atIndex = span.IndexOf('@');
+        if (atIndex >= 0)
+        {
+            if (atIndex + 1 >= span.Length) return false;
+            span = span[(atIndex + 1)..];
+        }
+
+        ReadOnlySpan<char> portToken;
+
+        if (span.Length > 0 && span[0] == '[')
+        {
+            var closeBracketIndex = span.IndexOf(']');
+            if (closeBracketIndex <= 0) return false;
+
+            if (closeBracketIndex + 1 == span.Length)
+                return true;
+
+            if (span[closeBracketIndex + 1] != ':') return false;
+
+            hasExplicitPort = true;
+            portToken = span[(closeBracketIndex + 2)..];
+        }
+        else
+        {
+            var colonIndex = span.LastIndexOf(':');
+            if (colonIndex <= 0)
+                return true;
+
+            hasExplicitPort = true;
+            portToken = span[(colonIndex + 1)..];
+        }
+
+        if (portToken.Length == 0)
+            return false;
+
+        if (!int.TryParse(portToken, NumberStyles.None, CultureInfo.InvariantCulture, out explicitPort) ||
+            explicitPort <= 0 ||
+            explicitPort > ushort.MaxValue)
+            return false;
+
+        return true;
     }
 
     private static ReadOnlyMemory<byte> GetEstablishedResponse(string? requestVersion)
@@ -300,7 +362,7 @@ public sealed class ConnectHandler
         if (upstream.Type is UpstreamProxyType.Socks4 or UpstreamProxyType.Socks5)
         {
             var socksProxy = new SocksUpstreamProxy(_logger, upstream, _config.Timeout);
-            var socket = await socksProxy.ConnectAsync(targetHost, targetPort, token).ConfigureAwait(false);
+            var socket = await socksProxy.ConnectAsync(targetHost, targetPort, token, clientSocket, _config).ConfigureAwait(false);
             return (socket, ReadOnlySequence<byte>.Empty, ReadOnlyMemory<byte>.Empty, 0);
         }
 
@@ -351,7 +413,6 @@ public sealed class ConnectHandler
 
             sb.Append("Connection: close").Append(ProxyConstants.Crlf);
 
-            var preserveClientProxyAuthorization = !IsLocalBasicAuthEnabled();
             if (!string.IsNullOrEmpty(upstream.Username))
             {
                 var credentials = $"{upstream.Username}:{upstream.Password}";
@@ -368,7 +429,7 @@ public sealed class ConnectHandler
             void AppendFilteredHeader(string name, ReadOnlySequence<byte> value)
             {
                 if (connectionTokenHeaders.Contains(name)) return;
-                if (ShouldSkipConnectClientHeader(name, preserveClientProxyAuthorization)) return;
+                if (ShouldSkipConnectClientHeader(name)) return;
 
                 if (_config.AddViaHeader && name.Equals("Via", StringComparison.OrdinalIgnoreCase))
                 {
@@ -411,6 +472,9 @@ public sealed class ConnectHandler
 
             foreach (var customHeader in _config.CustomHeaders)
             {
+                if (connectionTokenHeaders.Contains(customHeader.Name)) continue;
+                if (ShouldSkipConnectClientHeader(customHeader.Name)) continue;
+
                 if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(customHeader.Name))
                     continue;
 
@@ -453,18 +517,11 @@ public sealed class ConnectHandler
         return name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Proxy-Connection", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Te", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Trailers", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("Upgrade", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool ShouldSkipConnectClientHeader(string name, bool preserveClientProxyAuthorization)
-    {
-        if (name.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase))
-            return !preserveClientProxyAuthorization;
-
-        return ShouldSkipConnectClientHeader(name);
     }
 
     private async ValueTask ConnectWithConfiguredBindingAsync(
@@ -486,11 +543,6 @@ public sealed class ConnectHandler
         }
 
         await socket.ConnectAsync(host, port, _config.Timeout, token).ConfigureAwait(false);
-    }
-
-    private bool IsLocalBasicAuthEnabled()
-    {
-        return _config.BasicAuth != null || _config.BasicAuthUsers.Count > 0;
     }
 
     private static string GetViaProtocolToken(string? requestVersion)

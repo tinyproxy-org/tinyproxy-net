@@ -267,6 +267,7 @@ public sealed class Connection : IDisposable
         const int InitialBufferSize = ProxyConstants.InitialHeaderBufferSize;
         const int MaxHeaderSize = ProxyConstants.MaxHeaderSize;
 
+        using var idleTimeoutScope = new IdleTimeoutScope(_config.Timeout, token);
         var buffer = ArrayPool<byte>.Shared.Rent(InitialBufferSize);
         var totalReceived = 0;
         var parser = new HttpRequestParser(_logger);
@@ -278,9 +279,10 @@ public sealed class Connection : IDisposable
                 var received = await _clientSocket.ReceiveAsync(
                     buffer.AsMemory(totalReceived),
                     SocketFlags.None,
-                    token).ConfigureAwait(false);
+                    idleTimeoutScope.Token).ConfigureAwait(false);
 
                 if (received == 0) return (null, false); // Connection closed
+                idleTimeoutScope.Touch();
 
                 totalReceived += received;
 
@@ -323,6 +325,11 @@ public sealed class Connection : IDisposable
 
             _logger.LogWarning("Request headers exceeded maximum size");
             return (null, true);
+        }
+        catch (OperationCanceledException) when (idleTimeoutScope.IsTimeoutCancellation)
+        {
+            _logger.LogWarning("Client request read idle timeout");
+            return (null, false);
         }
         finally
         {

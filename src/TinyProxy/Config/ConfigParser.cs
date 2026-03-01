@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Net;
 using System.Text.RegularExpressions;
 
 namespace TinyProxy.Config;
@@ -46,32 +48,34 @@ public sealed partial class ConfigParser
             switch (directive.ToLowerInvariant())
             {
                 case "listen":
-                    ParseListen(value, out var address, out var port);
+                    var address = ParseListenAddress(value, lineNumber);
                     config = config with
                     {
-                        ListenAddress = address,
-                        ListenPort = port
+                        ListenAddress = address
                     };
                     break;
 
                 case "port":
-                    if (ushort.TryParse(value, out var p)) config = config with { ListenPort = p };
+                    config = config with { ListenPort = ParsePortDirectiveValue("Port", value, lineNumber) };
                     break;
 
                 case "maxclients":
-                    if (int.TryParse(value, out var mc)) config = config with { MaxClients = mc };
+                    config = config with { MaxClients = ParseUnsignedIntDirectiveValue("MaxClients", value, lineNumber) };
                     break;
 
                 case "maxclientsperip":
-                    if (int.TryParse(value, out var mcip)) config = config with { MaxClientsPerIp = mcip };
+                    config = config with { MaxClientsPerIp = ParseUnsignedIntDirectiveValue("MaxClientsPerIp", value, lineNumber) };
                     break;
 
                 case "timeout":
-                    if (int.TryParse(value, out var t)) config = config with { Timeout = TimeSpan.FromSeconds(t) };
+                    var timeoutSeconds = ParseUnsignedIntDirectiveValue("Timeout", value, lineNumber);
+                    if (timeoutSeconds == 0)
+                        timeoutSeconds = ProxyConstants.DefaultConnectionTimeoutSeconds;
+                    config = config with { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
                     break;
 
                 case "connecttimeout":
-                    if (int.TryParse(value, out var ct)) config = config with { ConnectIdleTimeout = TimeSpan.FromSeconds(ct) };
+                    config = config with { ConnectIdleTimeout = TimeSpan.FromSeconds(ParseUnsignedIntDirectiveValue("ConnectTimeout", value, lineNumber)) };
                     break;
 
                 case "allow":
@@ -94,7 +98,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "filterurls":
-                    if (TryParseTinyProxyBoolean(value, out var filterUrls)) config = config with { FilterUrls = filterUrls };
+                    config = config with { FilterUrls = ParseBooleanDirectiveValue("FilterURLs", value, lineNumber) };
                     break;
 
                 case "filter":
@@ -104,11 +108,11 @@ public sealed partial class ConfigParser
                     break;
 
                 case "filterdefaultdeny":
-                    if (TryParseTinyProxyBoolean(value, out var fdd)) config = config with { FilterDefaultDeny = fdd };
+                    config = config with { FilterDefaultDeny = ParseBooleanDirectiveValue("FilterDefaultDeny", value, lineNumber) };
                     break;
 
                 case "filtercasesensitive":
-                    if (TryParseTinyProxyBoolean(value, out var fcs)) config = config with { FilterCaseSensitive = fcs };
+                    config = config with { FilterCaseSensitive = ParseBooleanDirectiveValue("FilterCaseSensitive", value, lineNumber) };
                     break;
 
                 case "filtertype":
@@ -117,10 +121,12 @@ public sealed partial class ConfigParser
                     else if (value.Equals("bre", StringComparison.OrdinalIgnoreCase) ||
                              value.Equals("ere", StringComparison.OrdinalIgnoreCase))
                         config = config with { FilterUseGlob = false };
+                    else
+                        throw new FormatException($"Invalid value '{value}' for FilterType at line {lineNumber}");
                     break;
 
                 case "connectport":
-                    if (ushort.TryParse(value, out var cp)) allowedConnectPorts.Add(cp);
+                    allowedConnectPorts.Add(ParsePortDirectiveValue("ConnectPort", value, lineNumber));
                     break;
 
                 case "logfile":
@@ -128,7 +134,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "syslog":
-                    if (TryParseTinyProxyBoolean(value, out var syslog)) config = config with { UseSyslog = syslog };
+                    config = config with { UseSyslog = ParseBooleanDirectiveValue("Syslog", value, lineNumber) };
                     break;
 
                 case "syslogserver":
@@ -136,16 +142,15 @@ public sealed partial class ConfigParser
                     break;
 
                 case "syslogport":
-                    if (int.TryParse(value, out var syslogPort)) config = config with { SyslogPort = syslogPort };
+                    config = config with { SyslogPort = ParsePortNumberDirectiveValue("SyslogPort", value, lineNumber) };
                     break;
 
                 case "viaheader":
-                    if (TryParseTinyProxyBoolean(value, out var via)) config = config with { AddViaHeader = via };
+                    config = config with { AddViaHeader = ParseBooleanDirectiveValue("ViaHeader", value, lineNumber) };
                     break;
 
                 case "disableviaheader":
-                    if (TryParseTinyProxyBoolean(value, out var disableVia))
-                        config = config with { AddViaHeader = !disableVia };
+                    config = config with { AddViaHeader = !ParseBooleanDirectiveValue("DisableViaHeader", value, lineNumber) };
                     break;
 
                 case "viaproxyname":
@@ -153,11 +158,11 @@ public sealed partial class ConfigParser
                     break;
 
                 case "xtinyproxy":
-                    if (TryParseTinyProxyBoolean(value, out var xtinyproxy)) config = config with { AddXTinyproxyHeader = xtinyproxy };
+                    config = config with { AddXTinyproxyHeader = ParseBooleanDirectiveValue("XTinyproxy", value, lineNumber) };
                     break;
 
                 case "verbose":
-                    if (TryParseTinyProxyBoolean(value, out var verbose)) config = config with { Verbose = verbose };
+                    config = config with { Verbose = ParseBooleanDirectiveValue("Verbose", value, lineNumber) };
                     break;
 
                 case "anonymous":
@@ -173,7 +178,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "bindsame":
-                    if (TryParseTinyProxyBoolean(value, out var bs)) config = config with { BindSame = bs };
+                    config = config with { BindSame = ParseBooleanDirectiveValue("BindSame", value, lineNumber) };
                     break;
 
                 case "reverseproxy":
@@ -183,13 +188,11 @@ public sealed partial class ConfigParser
                     break;
 
                 case "reversemagic":
-                    if (TryParseTinyProxyBoolean(value, out var reverseMagic))
-                        config = config with { ReverseMagicEnabled = reverseMagic };
+                    config = config with { ReverseMagicEnabled = ParseBooleanDirectiveValue("ReverseMagic", value, lineNumber) };
                     break;
 
                 case "reverseonly":
-                    if (TryParseTinyProxyBoolean(value, out var reverseOnly))
-                        config = config with { ReverseOnly = reverseOnly };
+                    config = config with { ReverseOnly = ParseBooleanDirectiveValue("ReverseOnly", value, lineNumber) };
                     break;
 
                 case "reversebaseurl":
@@ -197,7 +200,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "transparent":
-                    if (TryParseTinyProxyBoolean(value, out var tp)) config = config with { IsTransparentProxyEnabled = tp };
+                    config = config with { IsTransparentProxyEnabled = ParseBooleanDirectiveValue("Transparent", value, lineNumber) };
                     break;
 
                 case "basicauth":
@@ -268,21 +271,47 @@ public sealed partial class ConfigParser
         return config;
     }
 
-    private static void ParseListen(string value, out string address, out ushort port)
+    private static string ParseListenAddress(string value, int lineNumber)
     {
-        address = "127.0.0.1";
-        port = 8888;
+        var address = value.Trim();
+        if (address.Length == 0 || !IPAddress.TryParse(address, out _))
+            throw new FormatException($"Invalid value '{value}' for Listen at line {lineNumber}");
 
-        var colonIndex = value.LastIndexOf(':');
-        if (colonIndex >= 0)
-        {
-            address = value.Substring(0, colonIndex);
-            if (ushort.TryParse(value.Substring(colonIndex + 1), out var p)) port = p;
-        }
-        else
-        {
-            address = value;
-        }
+        return address;
+    }
+
+    private static ushort ParsePortDirectiveValue(string directive, string value, int lineNumber)
+    {
+        if (!ushort.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+            throw new FormatException($"Invalid value '{value}' for {directive} at line {lineNumber}");
+
+        return parsed;
+    }
+
+    private static int ParsePortNumberDirectiveValue(string directive, string value, int lineNumber)
+    {
+        var parsed = ParseUnsignedIntDirectiveValue(directive, value, lineNumber);
+        if (parsed > ushort.MaxValue)
+            throw new FormatException($"Invalid value '{value}' for {directive} at line {lineNumber}");
+
+        return parsed;
+    }
+
+    private static int ParseUnsignedIntDirectiveValue(string directive, string value, int lineNumber)
+    {
+        if (!uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) ||
+            parsed > int.MaxValue)
+            throw new FormatException($"Invalid value '{value}' for {directive} at line {lineNumber}");
+
+        return (int)parsed;
+    }
+
+    private static bool ParseBooleanDirectiveValue(string directive, string value, int lineNumber)
+    {
+        if (!TryParseTinyProxyBoolean(value, out var parsed))
+            throw new FormatException($"Invalid value '{value}' for {directive} at line {lineNumber}");
+
+        return parsed;
     }
 
     private static Configuration AddReversePath(

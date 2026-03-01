@@ -156,11 +156,9 @@ public sealed class TransparentProxy
             requestUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             return requestUri;
 
-        // Build absolute URI from components
-        // Omit port for standard HTTP port (80) - matches tinyproxy C behavior
-        var portSuffix = port == 80 ? "" : $":{port}";
+        // Aligns with tinyproxy C build_url(): always emit explicit port.
         var pathStr = path ?? requestUri;
 
-        return $"http://{host}{portSuffix}{pathStr}";
+        return $"http://{host}:{port}{pathStr}";
     }
 }

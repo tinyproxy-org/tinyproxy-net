@@ -116,7 +116,7 @@ public sealed class UrlFilter
 
     /// <summary>
     /// Matches a string against a glob pattern.
-    /// Supports * (matches any sequence) and ? (matches single character).
+    /// Supports fnmatch-like *, ?, [] classes, [!] negation and backslash escaping.
     /// </summary>
     private static bool MatchGlob(string input, string pattern)
     {
@@ -130,21 +130,46 @@ public sealed class UrlFilter
             if (patternIndex < pattern.Length)
             {
                 var patternChar = pattern[patternIndex];
+                var escaped = false;
 
-                if (patternChar == '?')
+                if (patternChar == '\\' && patternIndex + 1 < pattern.Length)
+                {
+                    escaped = true;
+                    patternChar = pattern[++patternIndex];
+                }
+
+                if (!escaped && patternChar == '?')
                 {
                     // ? matches any single character
                     inputIndex++;
                     patternIndex++;
                     continue;
                 }
-                else if (patternChar == '*')
+                else if (!escaped && patternChar == '*')
                 {
                     // * matches any sequence
                     starIndex = patternIndex;
                     inputBacktrackIndex = inputIndex;
                     patternIndex++;
                     continue;
+                }
+                else if (!escaped && patternChar == '[')
+                {
+                    if (TryParseCharacterClass(pattern, patternIndex, input[inputIndex], out var consumed, out var matchedClass))
+                    {
+                        if (matchedClass)
+                        {
+                            inputIndex++;
+                            patternIndex += consumed;
+                            continue;
+                        }
+                    }
+                    else if (input[inputIndex] == '[')
+                    {
+                        inputIndex++;
+                        patternIndex++;
+                        continue;
+                    }
                 }
                 else if (input[inputIndex] == patternChar)
                 {
@@ -171,6 +196,74 @@ public sealed class UrlFilter
         while (patternIndex < pattern.Length && pattern[patternIndex] == '*') patternIndex++;
 
         return patternIndex == pattern.Length;
+    }
+
+    private static bool TryParseCharacterClass(
+        string pattern,
+        int patternIndex,
+        char inputChar,
+        out int consumed,
+        out bool matched)
+    {
+        consumed = 1;
+        matched = false;
+
+        var index = patternIndex + 1;
+        if (index >= pattern.Length) return false;
+
+        var isNegated = false;
+        if (pattern[index] is '!' or '^')
+        {
+            isNegated = true;
+            index++;
+        }
+
+        if (index >= pattern.Length) return false;
+
+        var hasEntries = false;
+        var previousChar = '\0';
+        var hasPrevious = false;
+
+        while (index < pattern.Length)
+        {
+            if (pattern[index] == ']' && hasEntries)
+            {
+                consumed = index - patternIndex + 1;
+                matched = isNegated ? !matched : matched;
+                return true;
+            }
+
+            var current = pattern[index];
+            if (current == '\\' && index + 1 < pattern.Length)
+                current = pattern[++index];
+
+            hasEntries = true;
+
+            if (current == '-' && hasPrevious && index + 1 < pattern.Length && pattern[index + 1] != ']')
+            {
+                index++;
+                var rangeEnd = pattern[index];
+                if (rangeEnd == '\\' && index + 1 < pattern.Length)
+                    rangeEnd = pattern[++index];
+
+                if (inputChar >= previousChar && inputChar <= rangeEnd)
+                    matched = true;
+
+                hasPrevious = false;
+            }
+            else
+            {
+                if (inputChar == current)
+                    matched = true;
+
+                previousChar = current;
+                hasPrevious = true;
+            }
+
+            index++;
+        }
+
+        return false;
     }
 
     private string GetFilterTarget(Protocol.Http.HttpRequest request)
