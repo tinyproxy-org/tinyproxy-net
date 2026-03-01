@@ -5,7 +5,13 @@ internal class Program
     private static async Task Main(string[] args)
     {
         var configPath = GetConfigPath(args);
-        var config = LoadConfiguration(configPath);
+        if (!TryLoadConfiguration(configPath, Console.Error, out var loadedConfig) || loadedConfig is null)
+        {
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        var config = loadedConfig;
 
         // Create logger (syslog if configured, otherwise console)
         var logger = CreateLogger(config);
@@ -91,6 +97,21 @@ internal class Program
     private static Configuration LoadConfiguration(string configPath)
     {
         return ConfigParser.LoadFromFile(configPath);
+    }
+
+    private static bool TryLoadConfiguration(string configPath, TextWriter errorWriter, out Configuration? config)
+    {
+        try
+        {
+            config = LoadConfiguration(configPath);
+            return true;
+        }
+        catch (FileNotFoundException ex)
+        {
+            errorWriter.WriteLine(ex.Message);
+            config = null;
+            return false;
+        }
     }
 
     private static ILogger CreateLogger(Configuration config)

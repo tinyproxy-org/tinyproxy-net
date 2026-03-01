@@ -14,4 +14,11 @@
         <TrimMode>partial</TrimMode>
     </PropertyGroup>
 
+    <ItemGroup>
+        <None Update="tinyproxy.conf">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        </None>
+    </ItemGroup>
+
 </Project>
