@@ -19,6 +19,9 @@ public sealed class AccessLogger : IDisposable
     private readonly object _lock = new();
     private StreamWriter? _writer;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AccessLogger"/> class.
+    /// </summary>
     public AccessLogger(Configuration config, ILogger logger)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -46,13 +49,12 @@ public sealed class AccessLogger : IDisposable
     }
 
     /// <summary>
-    /// Logs an access event.
+    /// Executes log access.
     /// </summary>
     public void LogAccess(string clientIp, string method, string uri, string version, int statusCode, long bytesSent)
     {
         var timestamp = DateTime.Now.ToString("dd/MMM/yyyy:HH:mm:ss zz00");
 
-        // Sanitize inputs to prevent log injection
         var safeIp = SanitizeLogValue(clientIp);
         var safeUri = SanitizeLogValue(uri);
         var safeMethod = SanitizeLogValue(method);
@@ -72,8 +74,6 @@ public sealed class AccessLogger : IDisposable
                     _logger.LogError($"Failed to write to log file: {ex.Message}");
                 }
             else
-                // Write directly to stdout without prefix (like tinyproxy C)
-                // Use shared lock to prevent interleaving with ConsoleLogger output
                 lock (ConsoleLock.Lock)
                 {
                     Console.WriteLine(logEntry);
@@ -81,6 +81,9 @@ public sealed class AccessLogger : IDisposable
         }
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         lock (_lock)
@@ -91,7 +94,7 @@ public sealed class AccessLogger : IDisposable
     }
 
     /// <summary>
-    /// Logs a CONNECT request.
+    /// Executes log connect.
     /// </summary>
     public void LogConnect(string clientIp, string host, int port, bool success)
     {
@@ -113,8 +116,7 @@ public sealed class AccessLogger : IDisposable
         var sb = StringBuilderCache.Acquire(value.Length);
 
         foreach (var c in value)
-            // Allow printable ASCII and common Unicode printable characters
-            // Skip control characters and newlines
+            // SECURITY: replace control chars to prevent log injection and line breaks.
             if (c == '\r' || c == '\n' || c == '\t' || char.IsControl(c))
                 sb.Append(' ');
             else

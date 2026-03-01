@@ -4,7 +4,6 @@ namespace TinyProxy.Core;
 
 /// <summary>
 /// Manages PID file writing and cleanup.
-/// Aligns with tinyproxy C's pidfile handling.
 /// </summary>
 public sealed class PidFileManager : IDisposable
 {
@@ -12,6 +11,9 @@ public sealed class PidFileManager : IDisposable
     private readonly string? _pidFilePath;
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="PidFileManager"/> class.
+    /// </summary>
     public PidFileManager(ILogger logger, string? pidFilePath)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -26,7 +28,6 @@ public sealed class PidFileManager : IDisposable
         {
             var pid = Process.GetCurrentProcess().Id;
 
-            // Ensure directory exists
             var directory = Path.GetDirectoryName(_pidFilePath);
             if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory)) Directory.CreateDirectory(directory);
 
@@ -42,6 +43,9 @@ public sealed class PidFileManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

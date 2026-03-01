@@ -21,6 +21,9 @@ public sealed class ConnectHandler
     private static readonly byte[] s_establishedResponseHttp11 = Encoding.ASCII.GetBytes(
         "HTTP/1.1 200 Connection established\r\nProxy-agent: TinyProxy.NET\r\n\r\n");
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConnectHandler"/> class.
+    /// </summary>
     public ConnectHandler(
         ILogger logger,
         Configuration config,
@@ -37,13 +40,15 @@ public sealed class ConnectHandler
         _loopDetector = loopDetector;
     }
 
+    /// <summary>
+    /// Handles connect async.
+    /// </summary>
     public async ValueTask HandleConnectAsync(
         Connection connection,
-        Http.HttpRequest request,
+        HttpRequest request,
         ReadOnlySequence<byte> initialData,
         CancellationToken token)
     {
-        // Parse host:port from CONNECT request
         if (!TryParseConnectTarget(request.Uri, out var host, out var port))
         {
             _stats.IncrementFailedRequests();
@@ -57,8 +62,7 @@ public sealed class ConnectHandler
 
         if (_config.Verbose) _logger.LogInfo($"CONNECT {host}:{port}");
 
-        // Check if port is allowed
-        var filter = new Filter.ConnectFilter(_config);
+        var filter = new ConnectFilter(_config);
         if (!filter.IsPortAllowed((ushort)port))
         {
             _logger.LogWarning($"CONNECT port {port} not allowed");
@@ -75,7 +79,6 @@ public sealed class ConnectHandler
 
         try
         {
-            // Connect to target server (directly or through configured upstream proxy).
             var (serverSocket, serverInitialData, upstreamResponseHeader, upstreamStatusCode) = await ConnectToTunnelEndpointAsync(
                 host,
                 port,
@@ -88,7 +91,7 @@ public sealed class ConnectHandler
                 if (upstreamStatusCode > 0)
                 {
                     var upstreamContentLength = TryParseContentLength(upstreamResponseHeader.Span);
-                    var sanitizedHeader = Http.HttpForwarder.BuildForwardResponseHeader(
+                    var sanitizedHeader = HttpForwarder.BuildForwardResponseHeader(
                         upstreamResponseHeader.Span,
                         upstreamStatusCode,
                         _config.AddViaHeader,
@@ -96,10 +99,8 @@ public sealed class ConnectHandler
                         GetViaProtocolToken(request.Version),
                         _config.ReverseBaseUrl,
                         _config.ReversePaths,
-                        reverseMagicCookiePath: null);
+                        null);
 
-                    // Align with tinyproxy C behavior for CONNECT over HTTP upstream:
-                    // forward upstream response to client instead of generating local 200.
                     await connection.ClientSocket.SendAllAsync(sanitizedHeader, token).ConfigureAwait(false);
                     prefixedServerToClientBytes += sanitizedHeader.Length;
 
@@ -120,13 +121,12 @@ public sealed class ConnectHandler
                 }
                 else
                 {
-                    // Direct/SOCKS CONNECT response generated locally (tinyproxy C direct behavior).
+                    // For direct or SOCKS tunnels, send a local 200 response.
                     await connection.ClientSocket.SendAllAsync(
                         GetEstablishedResponse(request.Version),
                         token).ConfigureAwait(false);
                 }
 
-                // Start bidirectional tunnel with timeout
                 var (bytesToServer, bytesToClient) = await RunTunnelAsync(
                     connection.ClientSocket,
                     serverSocket,
@@ -143,21 +143,17 @@ public sealed class ConnectHandler
         {
             _stats.IncrementFailedRequests();
             if (isDirectConnect)
-            {
                 await HtmlErrorPages.SendErrorAsync(
                     connection.ClientSocket,
                     500,
                     "Internal Server Error",
                     $"Connection to {host}:{port} refused",
                     token);
-            }
             else
-            {
                 await HtmlErrorPages.BadGatewayAsync(
                     connection.ClientSocket,
                     $"Connection to {host}:{port} refused",
                     token);
-            }
 
             LogConnect(request, host, port, false);
         }
@@ -165,21 +161,17 @@ public sealed class ConnectHandler
         {
             _stats.IncrementFailedRequests();
             if (isDirectConnect)
-            {
                 await HtmlErrorPages.SendErrorAsync(
                     connection.ClientSocket,
                     500,
                     "Internal Server Error",
                     $"Connection to {host}:{port} timed out",
                     token);
-            }
             else
-            {
                 await HtmlErrorPages.GatewayTimeoutAsync(
                     connection.ClientSocket,
                     $"Connection to {host}:{port} timed out",
                     token);
-            }
 
             LogConnect(request, host, port, false);
         }
@@ -188,21 +180,17 @@ public sealed class ConnectHandler
             _logger.LogError($"CONNECT error: {ex.Message}");
             _stats.IncrementFailedRequests();
             if (isDirectConnect)
-            {
                 await HtmlErrorPages.SendErrorAsync(
                     connection.ClientSocket,
                     500,
                     "Internal Server Error",
                     ex.Message,
                     token);
-            }
             else
-            {
                 await HtmlErrorPages.BadGatewayAsync(
                     connection.ClientSocket,
                     ex.Message,
                     token);
-            }
 
             LogConnect(request, host, port, false);
         }
@@ -286,7 +274,7 @@ public sealed class ConnectHandler
             return Encoding.ASCII.GetBytes($"HTTP/1.{minorVersion} 200 Connection established\r\nProxy-agent: TinyProxy.NET\r\n\r\n");
         }
 
-        // tinyproxy C falls back to HTTP/1.0 when the parsed major version is not 1.
+        // Fall back to HTTP/1.0 when version token is missing or not HTTP/1.x.
         return s_establishedResponseHttp10;
     }
 
@@ -300,13 +288,13 @@ public sealed class ConnectHandler
         var dotIndex = versionPart.IndexOf('.');
         if (dotIndex <= 0 || dotIndex >= versionPart.Length - 1) return false;
 
-        if (!TryParseUnsignedPrefix(versionPart[..dotIndex], requireWholeToken: true, out var major) || major != 1)
+        if (!TryParseUnsignedPrefix(versionPart[..dotIndex], true, out var major) || major != 1)
             return false;
 
-        return TryParseUnsignedPrefix(versionPart[(dotIndex + 1)..], requireWholeToken: false, out minor);
+        return TryParseUnsignedPrefix(versionPart[(dotIndex + 1)..], false, out minor);
     }
 
-    // Matches tinyproxy C's sscanf("HTTP/%u.%u") behavior: accept trailing chars after minor.
+    // Parse an unsigned numeric prefix; optionally allow a trailing suffix.
     private static bool TryParseUnsignedPrefix(ReadOnlySpan<char> value, bool requireWholeToken, out int number)
     {
         number = 0;
@@ -321,7 +309,7 @@ public sealed class ConnectHandler
             var digit = current - '0';
             if (number > (int.MaxValue - digit) / 10) return false;
 
-            number = (number * 10) + digit;
+            number = number * 10 + digit;
             consumed++;
         }
 
@@ -338,12 +326,13 @@ public sealed class ConnectHandler
         _loopDetector.RecordOutgoingLocalEndpoint(socket.LocalEndPoint);
     }
 
-    private async ValueTask<(Socket socket, ReadOnlySequence<byte> serverInitialData, ReadOnlyMemory<byte> upstreamResponseHeader, int upstreamStatusCode)> ConnectToTunnelEndpointAsync(
-        string targetHost,
-        int targetPort,
-        Http.HttpRequest request,
-        Socket clientSocket,
-        CancellationToken token)
+    private async ValueTask<(Socket socket, ReadOnlySequence<byte> serverInitialData, ReadOnlyMemory<byte> upstreamResponseHeader, int upstreamStatusCode)>
+        ConnectToTunnelEndpointAsync(
+            string targetHost,
+            int targetPort,
+            HttpRequest request,
+            Socket clientSocket,
+            CancellationToken token)
     {
         var upstream = _config.ResolveUpstreamProxy(targetHost);
         if (upstream == null)
@@ -391,7 +380,7 @@ public sealed class ConnectHandler
     }
 
     private byte[] BuildHttpUpstreamConnectRequest(
-        Http.HttpRequest request,
+        HttpRequest request,
         string targetHost,
         int targetPort,
         UpstreamProxyConfig upstream)
@@ -444,15 +433,11 @@ public sealed class ConnectHandler
             }
 
             if (request.HeaderLines.Count > 0)
-            {
                 foreach (var header in request.HeaderLines)
                     AppendFilteredHeader(header.Key, header.Value);
-            }
             else
-            {
                 foreach (var header in request.Headers)
                     AppendFilteredHeader(header.Key, header.Value);
-            }
 
             if (_config.AddViaHeader)
             {
@@ -559,18 +544,16 @@ public sealed class ConnectHandler
         return Encoding.ASCII.GetString(span);
     }
 
-    private static HashSet<string> ExtractConnectionTokenHeaders(Http.HttpRequest request)
+    private static HashSet<string> ExtractConnectionTokenHeaders(HttpRequest request)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (request.HeaderLines.Count > 0)
         {
             foreach (var (name, value) in request.HeaderLines)
-            {
                 if (name.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
                     name.Equals("Proxy-Connection", StringComparison.OrdinalIgnoreCase))
                     AddConnectionTokenHeaders(value, result);
-            }
         }
         else
         {
@@ -633,10 +616,10 @@ public sealed class ConnectHandler
         return value switch
         {
             (byte)'(' or (byte)')' or (byte)'<' or (byte)'>' or (byte)'@' or
-            (byte)',' or (byte)';' or (byte)':' or (byte)'\\' or (byte)'"' or
-            (byte)'/' or (byte)'[' or (byte)']' or (byte)'?' or (byte)'=' or
-            (byte)'{' or (byte)'}' or (byte)' ' or (byte)'\t' or (byte)'\r' or
-            (byte)'\n' => true,
+                (byte)',' or (byte)';' or (byte)':' or (byte)'\\' or (byte)'"' or
+                (byte)'/' or (byte)'[' or (byte)']' or (byte)'?' or (byte)'=' or
+                (byte)'{' or (byte)'}' or (byte)' ' or (byte)'\t' or (byte)'\r' or
+                (byte)'\n' => true,
             _ => false
         };
     }
@@ -781,9 +764,7 @@ public sealed class ConnectHandler
                     Utf8Parser.TryParse(value, out long parsedLength, out var consumed) &&
                     consumed == value.Length &&
                     parsedLength >= 0)
-                {
                     return parsedLength;
-                }
             }
 
             offset = lineEnd + 1;
@@ -797,9 +778,8 @@ public sealed class ConnectHandler
         if (name.Length != expected.Length) return false;
 
         for (var i = 0; i < name.Length; i++)
-        {
-            if (!EqualsIgnoreCaseAscii(name[i], expected[i])) return false;
-        }
+            if (!EqualsIgnoreCaseAscii(name[i], expected[i]))
+                return false;
 
         return true;
     }
@@ -847,7 +827,6 @@ public sealed class ConnectHandler
         ReadOnlySequence<byte> initialServerData,
         CancellationToken token)
     {
-        // Use idle timeout (not absolute timeout) to align with tinyproxy C relay behavior.
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
         var idleTimeout = _config.ConnectIdleTimeout;
         var idleTimeoutSync = idleTimeout > TimeSpan.Zero ? new object() : null;
@@ -865,18 +844,14 @@ public sealed class ConnectHandler
 
         TouchIdleTimeout();
 
-        // Run both directions concurrently
         var clientToServer = CopyDataAsync(client, server, "Client->Server", initialClientData, cts.Token, TouchIdleTimeout);
         var serverToClient = CopyDataAsync(server, client, "Server->Client", initialServerData, cts.Token, TouchIdleTimeout);
 
-        // Keep forwarding until both directions complete (or timeout/cancellation).
-        // This aligns with tinyproxy C relay behavior and avoids truncating half-close flows.
         await Task.WhenAll(clientToServer, serverToClient).ConfigureAwait(false);
 
         var toServer = await clientToServer.ConfigureAwait(false);
         var toClient = await serverToClient.ConfigureAwait(false);
 
-        // Try to shutdown both sockets
         try
         {
             server.Shutdown(SocketShutdown.Both);
@@ -884,7 +859,6 @@ public sealed class ConnectHandler
         }
         catch
         {
-            // Ignore shutdown errors
         }
 
         return (toServer, toClient);
@@ -974,8 +948,7 @@ public sealed class ConnectHandler
         CancellationToken token,
         Action? onActivity = null)
     {
-        // Use larger buffer for tunnel data transfer
-        const int TunnelBufferSize = 65536;
+        const int TunnelBufferSize = 65536; // PERF: improves throughput on large tunnel transfers.
 
         var buffer = ArrayPool<byte>.Shared.Rent(TunnelBufferSize);
         long totalBytes = 0;
@@ -983,7 +956,6 @@ public sealed class ConnectHandler
 
         try
         {
-            // First, send any initial data we have
             if (initialData.Length > 0)
                 foreach (var segment in initialData)
                 {
@@ -992,7 +964,6 @@ public sealed class ConnectHandler
                     onActivity?.Invoke();
                 }
 
-            // Then copy data continuously
             while (true)
             {
                 var received = await source.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
@@ -1006,13 +977,13 @@ public sealed class ConnectHandler
                 await destination.SendAllAsync(buffer.AsMemory(0, received), token).ConfigureAwait(false);
                 onActivity?.Invoke();
 
-                // Cooperative yield for fairness under high load
+                // PERF: cooperative yield improves fairness under sustained high throughput.
                 if (received > 32768) await Task.Yield();
             }
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException)
         {
-            // Expected when connection closes or timeout.
+            // Expected when peer closes, timeout triggers, or cancellation is requested.
         }
         finally
         {
@@ -1021,25 +992,21 @@ public sealed class ConnectHandler
 
         // Preserve half-close semantics so the opposite relay direction can complete promptly.
         if (sourceClosed)
-        {
             try
             {
                 destination.Shutdown(SocketShutdown.Send);
             }
             catch (SocketException)
             {
-                // Destination might already be closed.
             }
             catch (ObjectDisposedException)
             {
-                // Destination already disposed.
             }
-        }
 
         return totalBytes;
     }
 
-    private void LogConnect(Http.HttpRequest request, string host, int port, bool success)
+    private void LogConnect(HttpRequest request, string host, int port, bool success)
     {
         _accessLogger.LogConnect(_clientIp, host, port, success);
     }

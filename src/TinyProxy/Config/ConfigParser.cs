@@ -4,14 +4,14 @@ using System.Text.RegularExpressions;
 
 namespace TinyProxy.Config;
 
-/// <summary>
-/// Parses tinyproxy.conf style configuration files.
-/// </summary>
 public sealed partial class ConfigParser
 {
     private static readonly Regex s_commentRegex = CommentRegex();
     private static readonly Regex s_directiveRegex = DirectiveRegex();
 
+    /// <summary>
+    /// Executes parse.
+    /// </summary>
     public static Configuration Parse(string content)
     {
         var config = new Configuration();
@@ -35,7 +35,6 @@ public sealed partial class ConfigParser
             var line = lines[index];
             var trimmed = line.Trim();
 
-            // Skip empty lines and comments
             if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#')) continue;
 
             var match = s_directiveRegex.Match(trimmed);
@@ -89,8 +88,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "filterurl":
-                    // Compatibility: legacy singular form used as an inline pattern in this project.
-                    // tinyproxy C uses "FilterURLs" (plural) as a boolean directive.
+                    // "FilterURL" accepts either a boolean toggle or an inline pattern.
                     if (TryParseTinyProxyBoolean(value, out var filterUrlsLegacy))
                         config = config with { FilterUrls = filterUrlsLegacy };
                     else
@@ -102,7 +100,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "filter":
-                    // tinyproxy C semantics: Filter directive is a file path.
+                    // "Filter" is treated as a file path and loaded into FilterPatterns.
                     config = config with { FilterFile = value };
                     filterPatterns.AddRange(LoadFilterFile(value));
                     break;
@@ -211,6 +209,7 @@ public sealed partial class ConfigParser
                         if (primaryBasicAuth == null)
                             primaryBasicAuth = new BasicAuthConfig { Username = baUser, Password = baPass };
                     }
+
                     break;
 
                 case "upstream":
@@ -234,8 +233,7 @@ public sealed partial class ConfigParser
                     break;
 
                 case "addheader":
-                    // tinyproxy C syntax: AddHeader "Header-Name" "Header-Value"
-                    // Legacy compatibility: AddHeader "Header-Name: Header-Value"
+                    // "AddHeader" supports both two-token form and "Name: Value" form.
                     if (TryParseAddHeader(value, out var customHeader))
                     {
                         customHeaders.Add(customHeader);
@@ -249,7 +247,6 @@ public sealed partial class ConfigParser
             }
         }
 
-        // Apply collections
         config = config with
         {
             AllowIPs = allowIPs,
@@ -319,7 +316,6 @@ public sealed partial class ConfigParser
         List<ReversePathConfig> reversePaths,
         ReversePathConfig reversePath)
     {
-        // Align with tinyproxy C's reversepath_add: newer rules are prepended.
         reversePaths.Insert(0, reversePath);
         return config with { IsReverseProxyEnabled = true };
     }
@@ -387,7 +383,6 @@ public sealed partial class ConfigParser
     {
         if (rule.Domain == null)
         {
-            // Align with tinyproxy C's duplicate default upstream behavior: keep the first default rule.
             if (rules.Any(r => r.Domain == null)) return config;
 
             rules.Add(rule);
@@ -398,7 +393,7 @@ public sealed partial class ConfigParser
             return config;
         }
 
-        // Align with tinyproxy C's upstream_add: domain-specific rules are prepended.
+
         rules.Insert(0, rule);
         return config;
     }
@@ -410,7 +405,7 @@ public sealed partial class ConfigParser
         var tokens = TokenizeArguments(value);
         if (tokens.Count == 0) return false;
 
-        // tinyproxy C syntax: Upstream none <domain>
+        // "Upstream none <domain>" creates a domain rule that bypasses upstream proxying.
         if (tokens[0].Equals("none", StringComparison.OrdinalIgnoreCase))
         {
             if (tokens.Count < 2 || string.IsNullOrWhiteSpace(tokens[1])) return false;
@@ -558,22 +553,22 @@ public sealed partial class ConfigParser
         return ushort.TryParse(span[(colonIndex + 1)..], out port) && !string.IsNullOrWhiteSpace(host);
     }
 
+    /// <summary>
+    /// Loads from file.
+    /// </summary>
     public static Configuration LoadFromFile(string path)
     {
         if (!File.Exists(path))
-        {
             throw new FileNotFoundException(
                 $"Could not open config file \"{Path.GetFullPath(path)}\".\n" +
                 "Usage: tinyproxy [-c <config-file>]\n" +
                 "Default config locations: /etc/tinyproxy/tinyproxy.conf or ./tinyproxy.conf",
                 path);
-        }
         var content = File.ReadAllText(path);
         return Parse(content);
     }
 
     /// <summary>
-    /// Parses tinyproxy-style booleans.
     /// Supports yes/no, on/off, true/false, 1/0.
     /// </summary>
     private static bool TryParseTinyProxyBoolean(string value, out bool result)
@@ -610,7 +605,6 @@ public sealed partial class ConfigParser
 
     /// <summary>
     /// Loads filter patterns from a file.
-    /// Aligns with tinyproxy C's filter_init() in filter.c.
     /// </summary>
     public static List<string> LoadFilterFile(string path)
     {
@@ -619,10 +613,8 @@ public sealed partial class ConfigParser
         try
         {
             foreach (var line in File.ReadAllLines(path))
-            {
                 if (TryExtractFilterPattern(line.AsSpan(), out var pattern))
                     patterns.Add(pattern);
-            }
         }
         catch (Exception ex)
         {

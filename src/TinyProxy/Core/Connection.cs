@@ -20,10 +20,24 @@ public sealed class Connection : IDisposable
     private readonly LoopDetector _loopDetector;
     private bool _disposed;
 
+    /// <summary>
+    /// Gets client socket.
+    /// </summary>
     public Socket ClientSocket => _clientSocket;
+
+    /// <summary>
+    /// Gets remote endpoint text for the client socket.
+    /// </summary>
     public string RemoteEndPoint => _clientSocket.RemoteEndPoint?.ToString() ?? "unknown";
+
+    /// <summary>
+    /// Gets client ip.
+    /// </summary>
     public string ClientIp => _clientIp;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="Connection"/> class.
+    /// </summary>
     public Connection(
         Socket clientSocket,
         ILogger logger,
@@ -40,8 +54,6 @@ public sealed class Connection : IDisposable
         _loopDetector = loopDetector ?? throw new ArgumentNullException(nameof(loopDetector));
 
         _clientIp = ExtractClientIp();
-
-        // Create filter instances with current configuration
         _accessControl = new AccessControl(_config);
         _basicAuth = new BasicAuth(_config);
         _urlFilter = new UrlFilter(_config, _logger);
@@ -49,7 +61,7 @@ public sealed class Connection : IDisposable
 
     private string ExtractClientIp()
     {
-        if (_clientSocket.RemoteEndPoint is System.Net.IPEndPoint ip) return ip.Address.ToString();
+        if (_clientSocket.RemoteEndPoint is IPEndPoint ip) return ip.Address.ToString();
         return "unknown";
     }
 
@@ -62,7 +74,6 @@ public sealed class Connection : IDisposable
 
         try
         {
-            // Aligns with tinyproxy C's loop.c: detect proxy self-loop before reading request.
             if (_loopDetector.IsLoopDetected(_clientSocket.RemoteEndPoint))
             {
                 _stats.IncrementFailedRequests();
@@ -74,8 +85,6 @@ public sealed class Connection : IDisposable
                 return;
             }
 
-            // Check access control (IP whitelist/blacklist) before reading request.
-            // Aligns with tinyproxy C's handle_connection() ordering.
             var remoteEndPoint = _clientSocket.RemoteEndPoint;
             if (remoteEndPoint != null && !await _accessControl.IsAllowedAsync(_clientSocket, token).ConfigureAwait(false))
             {
@@ -89,7 +98,6 @@ public sealed class Connection : IDisposable
                 return;
             }
 
-            // Read first request to determine if it's CONNECT.
             var (firstRequest, isBadRequest) = await ReadFirstRequestAsync(token).ConfigureAwait(false);
             if (firstRequest == null)
             {
@@ -102,14 +110,13 @@ public sealed class Connection : IDisposable
                         token).ConfigureAwait(false);
                 }
 
-                return; // Connection closed or invalid
+                return;
             }
 
             _stats.IncrementRequests();
             var isStatPageRequest = IsStatPageRequest(firstRequest);
             var wasReverseRewritten = false;
 
-            // Check authentication
             var authHeader = GetAuthHeader(firstRequest, isStatPageRequest, out var statHostAuthFlow);
             if (!_basicAuth.Validate(authHeader))
             {
@@ -140,7 +147,7 @@ public sealed class Connection : IDisposable
             if (firstRequest.Method == Protocol.Http.HttpMethod.Connect &&
                 TextUtils.TryParseHostPort(firstRequest.Uri, 443, out _, out var connectPort))
             {
-                var connectFilter = new Filter.ConnectFilter(_config);
+                var connectFilter = new ConnectFilter(_config);
                 if (!connectFilter.IsPortAllowed((ushort)connectPort))
                 {
                     _logger.LogWarning($"CONNECT port {connectPort} not allowed");
@@ -155,7 +162,6 @@ public sealed class Connection : IDisposable
                 }
             }
 
-            // Reverse rewriting must happen before filtering to align with tinyproxy C.
             if (_config.IsReverseProxyEnabled && _config.ReversePaths.Count > 0)
             {
                 var reverseProxy = new Protocol.ReverseProxy(_logger, _config, _stats, _accessLogger, _clientIp);
@@ -180,7 +186,6 @@ public sealed class Connection : IDisposable
                 }
             }
 
-            // In transparent mode, determine destination before filtering.
             if (_config.IsTransparentProxyEnabled &&
                 firstRequest.Method != Protocol.Http.HttpMethod.Connect &&
                 !IsAbsoluteFormUri(firstRequest.Uri))
@@ -200,14 +205,12 @@ public sealed class Connection : IDisposable
                     return;
                 }
 
-                // Rewrite the request URI with the transparent destination.
                 var newUri = transparentProxy.BuildAbsoluteUri(firstRequest.Uri, dest.Value.host, dest.Value.port, firstRequest.Uri);
                 firstRequest = firstRequest.WithUri(newUri);
 
                 if (_config.Verbose) _logger.LogInfo($"Transparent proxy resolved to: {firstRequest.Uri}");
             }
 
-            // Check URL filter only when filter is configured.
             if (_urlFilter.IsEnabled && !_urlFilter.IsRequestAllowed(firstRequest))
             {
                 _logger.LogWarning($"URL filtered: {firstRequest.Uri}");
@@ -223,7 +226,6 @@ public sealed class Connection : IDisposable
 
             if (_config.Verbose) _logger.LogInfo($"{firstRequest.Method} {firstRequest.Uri}");
 
-            // Check if this is a statistics page request
             if (!wasReverseRewritten &&
                 !string.IsNullOrEmpty(_config.StatHost) &&
                 isStatPageRequest)
@@ -234,16 +236,13 @@ public sealed class Connection : IDisposable
                 return;
             }
 
-            // Route based on method
             if (firstRequest.Method == Protocol.Http.HttpMethod.Connect)
             {
-                // Handle CONNECT - use remaining data for tunnel
                 var connectHandler = new Protocol.ConnectHandler(_logger, _config, _stats, _accessLogger, _clientIp, _loopDetector);
                 await connectHandler.HandleConnectAsync(this, firstRequest, firstRequest.Body, token);
             }
             else
             {
-                // Handle regular HTTP request
                 var forwarder = new HttpForwarder(_logger, _config, _stats, _accessLogger, _clientIp, _loopDetector);
                 await forwarder.ForwardAsync(this, firstRequest, token);
             }
@@ -286,11 +285,9 @@ public sealed class Connection : IDisposable
 
                 totalReceived += received;
 
-                // Find end of headers (double CRLF)
                 var headerEnd = FindHeaderEnd(buffer.AsSpan(0, totalReceived));
                 if (headerEnd >= 0)
                 {
-                    // Full headers received, parse the request
                     var sequence = new ReadOnlySequence<byte>(buffer.AsMemory(0, totalReceived));
 
                     if (!parser.TryParseRequest(ref sequence, out var request))
@@ -306,7 +303,6 @@ public sealed class Connection : IDisposable
                     return (CloneBodyIfNeeded(request), false);
                 }
 
-                // Need more data - grow buffer if needed
                 if (totalReceived >= buffer.Length)
                 {
                     var newBufferSize = Math.Min(buffer.Length * 2, MaxHeaderSize);
@@ -347,28 +343,21 @@ public sealed class Connection : IDisposable
 
     /// <summary>
     /// Finds the end of HTTP headers (\r\n\r\n or \n\n).
-    /// Aligns with tinyproxy C's CHECK_CRLF macro which supports both \r\n and single \n.
     /// </summary>
     private static int FindHeaderEnd(ReadOnlySpan<byte> span)
     {
         for (var i = 0; i < span.Length - 1; i++)
         {
-            // Check for CRLF CRLF (standard)
             if (i < span.Length - 3 &&
                 span[i] == '\r' && span[i + 1] == '\n' &&
                 span[i + 2] == '\r' && span[i + 3] == '\n')
                 return i + 4;
-            // Check for LF LF (non-standard but allowed by tinyproxy)
             if (span[i] == '\n' && span[i + 1] == '\n') return i + 2;
         }
 
         return -1;
     }
 
-    /// <summary>
-    /// Checks if the request is for the statistics page.
-    /// Aligns with tinyproxy C's statpage functionality in stats.c.
-    /// </summary>
     private bool IsStatPageRequest(HttpRequest request)
     {
         if (!TryGetNormalizedHost(_config.StatHost, 80, out var statHost)) return false;
@@ -406,7 +395,7 @@ public sealed class Connection : IDisposable
         if (!headers.TryGetValue(headerName, out var value) || value.Length == 0) return null;
 
         var span = value.IsSingleSegment ? value.FirstSpan : value.ToArray();
-        return System.Text.Encoding.ASCII.GetString(span);
+        return Encoding.ASCII.GetString(span);
     }
 
     private static bool TryGetNormalizedRequestHost(HttpRequest request, out string host)
@@ -431,15 +420,16 @@ public sealed class Connection : IDisposable
         return host.Length > 0;
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
-        // Close socket first to unblock pending operations
+        // Tear down socket before cancellation so pending I/O can unblock promptly.
         _clientSocket.Dispose();
-
-        // Then cancel and dispose token
         _cts.Cancel();
         _cts.Dispose();
     }

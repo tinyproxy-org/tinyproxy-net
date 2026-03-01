@@ -4,7 +4,6 @@ namespace TinyProxy.Filter;
 
 /// <summary>
 /// URL filtering using regex or glob patterns with ReDoS protection.
-/// Aligns with tinyproxy C's filter.c implementation.
 /// </summary>
 public sealed class UrlFilter
 {
@@ -13,15 +12,20 @@ public sealed class UrlFilter
     private readonly List<FilterRule> _regexRules;
     private readonly List<FilterRule> _globRules;
     private const int RegexTimeoutMs = 5000; // 5 second timeout for regex matching
+    /// <summary>
+    /// Gets a value indicating whether enabled.
+    /// </summary>
     public bool IsEnabled { get; }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="UrlFilter"/> class.
+    /// </summary>
     public UrlFilter(Configuration config, ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = logger ?? new ConsoleLogger();
         IsEnabled = HasConfiguredFilter(config);
 
-        // Parse filter regexes into rules
         _regexRules = new List<FilterRule>();
         _globRules = new List<FilterRule>();
 
@@ -36,7 +40,6 @@ public sealed class UrlFilter
                 continue;
             }
 
-            // Compile as regex with timeout protection
             try
             {
                 var options = config.FilterCaseSensitive
@@ -69,8 +72,7 @@ public sealed class UrlFilter
     }
 
     /// <summary>
-    /// Checks if a URL is allowed based on filter rules.
-    /// Aligns with tinyproxy C's filter_run function.
+    /// Determines whether allowed.
     /// </summary>
     public bool IsAllowed(string url)
     {
@@ -79,7 +81,6 @@ public sealed class UrlFilter
 
         var matched = false;
 
-        // Check regex rules with timeout protection
         foreach (var rule in _regexRules)
             if (rule.Regex?.IsMatch(url) == true)
             {
@@ -87,7 +88,6 @@ public sealed class UrlFilter
                 break;
             }
 
-        // Check glob rules
         if (!matched)
             foreach (var rule in _globRules)
                 if (MatchGlob(url, rule.Pattern))
@@ -96,19 +96,13 @@ public sealed class UrlFilter
                     break;
                 }
 
-        // Determine final result based on FilterDefaultDeny
-        if (_config.FilterDefaultDeny)
-            // Default deny, allow only if explicitly matched
-            return matched;
-        else
-            // Default allow, deny if matched
-            return !matched;
+        return _config.FilterDefaultDeny ? matched : !matched;
     }
 
     /// <summary>
-    /// Checks if a request is allowed based on its URI.
+    /// Determines whether request allowed.
     /// </summary>
-    public bool IsRequestAllowed(Protocol.Http.HttpRequest request)
+    public bool IsRequestAllowed(HttpRequest request)
     {
         var target = GetFilterTarget(request);
         return IsAllowed(target);
@@ -140,14 +134,12 @@ public sealed class UrlFilter
 
                 if (!escaped && patternChar == '?')
                 {
-                    // ? matches any single character
                     inputIndex++;
                     patternIndex++;
                     continue;
                 }
                 else if (!escaped && patternChar == '*')
                 {
-                    // * matches any sequence
                     starIndex = patternIndex;
                     inputBacktrackIndex = inputIndex;
                     patternIndex++;
@@ -173,14 +165,12 @@ public sealed class UrlFilter
                 }
                 else if (input[inputIndex] == patternChar)
                 {
-                    // Exact match
                     inputIndex++;
                     patternIndex++;
                     continue;
                 }
             }
 
-            // If we have a * to backtrack to
             if (starIndex >= 0)
             {
                 patternIndex = starIndex + 1;
@@ -192,7 +182,6 @@ public sealed class UrlFilter
             return false;
         }
 
-        // Skip trailing * in pattern
         while (patternIndex < pattern.Length && pattern[patternIndex] == '*') patternIndex++;
 
         return patternIndex == pattern.Length;
@@ -266,12 +255,12 @@ public sealed class UrlFilter
         return false;
     }
 
-    private string GetFilterTarget(Protocol.Http.HttpRequest request)
+    private string GetFilterTarget(HttpRequest request)
     {
         if (_config.FilterUrls)
             return GetUrlFilterTarget(request);
 
-        // tinyproxy default: filter by domain/host
+        // When URL filtering is disabled, match on host/domain only.
         if (request.Method == Protocol.Http.HttpMethod.Connect &&
             TextUtils.TryParseHostPort(request.Uri, 443, out var connectHost, out _))
             return connectHost;
@@ -286,10 +275,9 @@ public sealed class UrlFilter
         return request.Host ?? request.Uri;
     }
 
-    private static string GetUrlFilterTarget(Protocol.Http.HttpRequest request)
+    private static string GetUrlFilterTarget(HttpRequest request)
     {
-        // tinyproxy C filters CONNECT by the original URL token (host:port),
-        // not by a synthesized absolute URI.
+        // For CONNECT with FilterUrls enabled, match the raw request target (typically host:port).
         if (request.Method == Protocol.Http.HttpMethod.Connect)
             return request.Uri;
 

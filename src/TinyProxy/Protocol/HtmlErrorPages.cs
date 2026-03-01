@@ -88,13 +88,16 @@ public static class HtmlErrorPages
 </head>
 <body>
     <h1>{code} {status}</h1>
-    <p>{System.Net.WebUtility.HtmlEncode(message)}</p>
+    <p>{WebUtility.HtmlEncode(message)}</p>
     <hr>
     <address>TinyProxy.NET</address>
 </body>
 </html>";
     }
 
+    /// <summary>
+    /// Executes send error async.
+    /// </summary>
     public static async Task SendErrorAsync(
         Socket socket,
         int code,
@@ -113,36 +116,57 @@ public static class HtmlErrorPages
         await socket.SendAllAsync(buffer, token).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Executes bad request async.
+    /// </summary>
     public static Task BadRequestAsync(Socket socket, string message, CancellationToken token = default)
     {
         return SendErrorAsync(socket, 400, "Bad Request", message, token);
     }
 
+    /// <summary>
+    /// Executes forbidden async.
+    /// </summary>
     public static Task ForbiddenAsync(Socket socket, string message, CancellationToken token = default)
     {
         return SendErrorAsync(socket, 403, "Forbidden", message, token);
     }
 
+    /// <summary>
+    /// Executes not found async.
+    /// </summary>
     public static Task NotFoundAsync(Socket socket, string message, CancellationToken token = default)
     {
         return SendErrorAsync(socket, 404, "Not Found", message, token);
     }
 
+    /// <summary>
+    /// Executes bad gateway async.
+    /// </summary>
     public static Task BadGatewayAsync(Socket socket, string message, CancellationToken token = default)
     {
         return SendErrorAsync(socket, 502, "Bad Gateway", message, token);
     }
 
+    /// <summary>
+    /// Executes service unavailable async.
+    /// </summary>
     public static Task ServiceUnavailableAsync(Socket socket, string message, CancellationToken token = default)
     {
         return SendErrorAsync(socket, 503, "Service Unavailable", message, token);
     }
 
+    /// <summary>
+    /// Executes gateway timeout async.
+    /// </summary>
     public static Task GatewayTimeoutAsync(Socket socket, string message, CancellationToken token = default)
     {
         return SendErrorAsync(socket, 504, "Gateway Timeout", message, token);
     }
 
+    /// <summary>
+    /// Executes unauthorized async.
+    /// </summary>
     public static async Task UnauthorizedAsync(Socket socket, string realm = "TinyProxy", CancellationToken token = default)
     {
         var html = GetErrorContent(401, "Unauthorized", "This server could not verify that you are authorized to access the document requested.");
@@ -157,6 +181,9 @@ public static class HtmlErrorPages
         await socket.SendAllAsync(buffer, token).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Executes proxy authentication required async.
+    /// </summary>
     public static async Task ProxyAuthenticationRequiredAsync(Socket socket, string realm = "TinyProxy", CancellationToken token = default)
     {
         var html = GetErrorContent(407, "Proxy Authentication Required", "This server could not verify that you are authorized to access the document requested.");

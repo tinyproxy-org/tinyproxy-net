@@ -3,7 +3,6 @@ namespace TinyProxy.Protocol.Https;
 /// <summary>
 /// Protocol handler for HTTPS/CONNECT tunneling.
 /// Handles CONNECT method for SSL/TLS tunneling.
-/// Aligns with tinyproxy C's connect_method handling.
 /// </summary>
 public sealed class HttpsProtocolHandler : IProtocolHandler
 {
@@ -13,8 +12,14 @@ public sealed class HttpsProtocolHandler : IProtocolHandler
     private readonly AccessLogger _accessLogger;
     private readonly string _clientIp;
 
+    /// <summary>
+    /// Gets protocol name.
+    /// </summary>
     public string ProtocolName => "HTTPS/CONNECT";
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="HttpsProtocolHandler"/> class.
+    /// </summary>
     public HttpsProtocolHandler(
         ILogger logger,
         Configuration config,
@@ -29,14 +34,15 @@ public sealed class HttpsProtocolHandler : IProtocolHandler
         _clientIp = clientIp ?? "unknown";
     }
 
+    /// <summary>
+    /// Processes async.
+    /// </summary>
     public async ValueTask<ProcessingResult> ProcessAsync(
         Connection connection,
         HttpRequest request,
         CancellationToken token)
     {
         var connectHandler = new ConnectHandler(_logger, _config, _stats, _accessLogger, _clientIp);
-
-        // Handle CONNECT tunneling
         await connectHandler.HandleConnectAsync(connection, request, request.Body, token);
 
         return new ProcessingResult { Success = true, StatusCode = 200, BytesTransferred = 0 };

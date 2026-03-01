@@ -2,8 +2,6 @@ namespace TinyProxy.Core;
 
 /// <summary>
 /// Handles configuration hot-reload via file system watcher.
-/// Aligns with tinyproxy C's SIGHUP handling in main.c.
-///
 /// Uses FileSystemWatcher to detect configuration file changes,
 /// providing cross-platform hot-reload capability.
 /// </summary>
@@ -20,6 +18,9 @@ public sealed class ConfigReloader : IDisposable
     private bool _disposed;
     private string? _lastConfigSignature;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConfigReloader"/> class.
+    /// </summary>
     public ConfigReloader(
         ILogger logger,
         string configPath,
@@ -68,11 +69,9 @@ public sealed class ConfigReloader : IDisposable
     {
         if (_disposed) return;
 
-        // Check minimum interval between reloads
         var timeSinceLastReload = (DateTime.UtcNow - _lastReloadTime).TotalMilliseconds;
         if (timeSinceLastReload < MinReloadIntervalMs) return;
 
-        // Start/reset debounce timer
         _debounceTimer?.Change(ReloadDebounceMs, Timeout.Infinite);
     }
 
@@ -93,7 +92,6 @@ public sealed class ConfigReloader : IDisposable
 
         try
         {
-            // Update last reload time
             _lastReloadTime = DateTime.UtcNow;
 
             _logger.LogInfo($"Reloading configuration from {_configPath}");
@@ -155,10 +153,13 @@ public sealed class ConfigReloader : IDisposable
     }
 
     /// <summary>
-    /// Gets whether configuration reload is available.
+    /// Gets a value indicating whether enabled.
     /// </summary>
     public bool IsEnabled => _watcher != null;
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

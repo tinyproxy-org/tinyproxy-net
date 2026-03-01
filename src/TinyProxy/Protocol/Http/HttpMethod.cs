@@ -22,6 +22,9 @@ public enum HttpMethod
 /// </summary>
 public static class HttpMethodParser
 {
+    /// <summary>
+    /// Executes parse.
+    /// </summary>
     public static HttpMethod Parse(ReadOnlySpan<byte> method)
     {
         if (method.Length == 0) return HttpMethod.None;
@@ -56,6 +59,9 @@ public static class HttpMethodParser
         };
     }
 
+    /// <summary>
+    /// Executes to http string.
+    /// </summary>
     public static string ToHttpString(HttpMethod method)
     {
         return method switch

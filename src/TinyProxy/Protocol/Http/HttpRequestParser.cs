@@ -3,7 +3,7 @@ using System.Buffers.Text;
 namespace TinyProxy.Protocol.Http;
 
 /// <summary>
-/// HTTP request parser using Span<byte> with optimized string handling.
+/// HTTP request parser using <c>Span&lt;byte&gt;</c> with optimized string handling.
 /// Uses array pooling and zero-copy techniques to minimize allocations.
 /// </summary>
 public sealed class HttpRequestParser
@@ -15,6 +15,9 @@ public sealed class HttpRequestParser
     private const byte LF = (byte)'\n';
     private const byte Colon = (byte)':';
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="HttpRequestParser"/> class.
+    /// </summary>
     public HttpRequestParser(ILogger logger)
     {
         _logger = logger;
@@ -30,13 +33,12 @@ public sealed class HttpRequestParser
 
         if (buffer.IsEmpty) return false;
 
-        // Find end of headers (CRLF CRLF or LF LF for compatibility)
+        // Detect end of headers using CRLF-CRLF or LF-LF.
         if (!FindHeadersEnd(buffer, out _)) return false;
 
         var reader = new SequenceReader<byte>(buffer);
 
-        // Parse request line: METHOD SP URI SP VERSION (CR)LF.
-        // tinyproxy C skips leading blank lines before the actual request line.
+        // Skip leading blank lines and parse the first non-empty request line.
         byte[]? requestLineBytes = null;
         while (true)
         {
@@ -56,14 +58,13 @@ public sealed class HttpRequestParser
         var method = HttpMethodParser.Parse(methodSpan);
         if (method == HttpMethod.None) _logger.LogWarning($"Unknown HTTP method: {rawMethod}");
 
-        // tinyproxy C only accepts 2-token request lines for HTTP/0.9 GET.
+        // Only GET is allowed for HTTP/0.9 requests.
         if (versionSpan.SequenceEqual("HTTP/0.9"u8) && method != HttpMethod.Get)
             return false;
 
         var uri = GetAsciiString(uriSpan);
         var version = GetAsciiString(versionSpan);
 
-        // Parse headers
         var headers = new Dictionary<string, ReadOnlySequence<byte>>(StringComparer.OrdinalIgnoreCase);
         var headerLines = new List<KeyValuePair<string, ReadOnlySequence<byte>>>(16);
         string? host = null;
@@ -156,8 +157,7 @@ public sealed class HttpRequestParser
 
             if (!CommitCurrentHeader()) return false;
 
-            // Parse header: Name: Value.
-            // tinyproxy C ignores malformed headers instead of rejecting the entire request.
+            // Ignore malformed header lines and keep parsing.
             var colonIndex = headerLine.IndexOf(Colon);
             if (colonIndex <= 0) continue;
 
@@ -248,8 +248,7 @@ public sealed class HttpRequestParser
 
     private static bool IsValidHttpVersionToken(ReadOnlySpan<byte> token)
     {
-        // Matches tinyproxy C's sscanf("HTTP/%u.%u") behavior:
-        // requires HTTP/ + numeric major/minor, allows trailing characters.
+        // Accept HTTP/<major>.<minor> with numeric components; trailing suffix is ignored.
         if (token.Length < 8) return false;
 
         if (!EqualsIgnoreCaseAscii(token[0], (byte)'H') ||
@@ -331,7 +330,6 @@ public sealed class HttpRequestParser
 
     /// <summary>
     /// Finds the end of HTTP headers (CRLF CRLF or LF LF).
-    /// Aligns with tinyproxy C's CHECK_CRLF which supports both \r\n and single \n.
     /// </summary>
     private static bool FindHeadersEnd(ReadOnlySequence<byte> buffer, out SequencePosition position)
     {
@@ -344,14 +342,12 @@ public sealed class HttpRequestParser
 
         while (reader.TryRead(out var b))
         {
-            // Check for LF LF (non-standard but allowed by tinyproxy)
             if (p1 == LF && b == LF)
             {
                 position = reader.Position;
                 return true;
             }
 
-            // Check for CRLF CRLF
             if (p3 == CR && p2 == LF && p1 == CR && b == LF)
             {
                 position = reader.Position;

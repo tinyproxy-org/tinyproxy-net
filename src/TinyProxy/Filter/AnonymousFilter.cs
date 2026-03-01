@@ -2,7 +2,6 @@ namespace TinyProxy.Filter;
 
 /// <summary>
 /// Filters HTTP headers to protect client privacy.
-/// Aligns with tinyproxy C's anonymous.c functionality.
 /// When anonymous mode is enabled, only headers in the AllowedHeaders list are passed through.
 /// </summary>
 public sealed class AnonymousFilter
@@ -30,17 +29,14 @@ public sealed class AnonymousFilter
     {
         _allowedHeaders = new HashSet<string>(allowedHeaders, StringComparer.OrdinalIgnoreCase);
 
-        // tinyproxy C always inserts these when anonymous mode is enabled.
+        // Keep content framing headers when explicit allow-list mode is active.
         if (_allowedHeaders.Count > 0)
-        {
             foreach (var header in s_implicitAllowedHeaders)
                 _allowedHeaders.Add(header);
-        }
     }
 
     /// <summary>
-    /// Checks if a header is allowed to pass through.
-    /// Aligns with tinyproxy C's anonymous_search().
+    /// Determines whether header allowed.
     /// </summary>
     public bool IsHeaderAllowed(string headerName)
     {

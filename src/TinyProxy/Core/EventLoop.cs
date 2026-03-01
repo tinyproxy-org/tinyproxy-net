@@ -20,6 +20,9 @@ public sealed class EventLoop : IDisposable
     private bool _disposed;
     private Task? _runTask;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="EventLoop"/> class.
+    /// </summary>
     public EventLoop(
         IPAddress address,
         int port,
@@ -80,7 +83,6 @@ public sealed class EventLoop : IDisposable
                     var socket = await _listener.AcceptAsync(token).ConfigureAwait(false);
                     var clientIp = GetClientIp(socket);
 
-                    // Try to acquire a connection slot
                     var slot = await _connectionManager.TryAcquireSlotAsync(clientIp, token).ConfigureAwait(false);
                     if (slot == null)
                     {
@@ -95,17 +97,12 @@ public sealed class EventLoop : IDisposable
 
                     if (_config.Verbose) _logger.LogConnect($"Connection from {socket.RemoteEndPoint} (active: {_connectionManager.ActiveCount})");
 
-                    // Handle connection with slot management
                     var taskId = Interlocked.Increment(ref _nextTaskId);
                     var task = RunConnectionAsync(socket, slot, token);
 
-                    // Track task for graceful shutdown
                     _activeConnectionTasks[taskId] = task;
                     _ = task.ContinueWith(
-                        _ =>
-                        {
-                            _activeConnectionTasks.TryRemove(taskId, out var removedTask);
-                        },
+                        _ => { _activeConnectionTasks.TryRemove(taskId, out var removedTask); },
                         CancellationToken.None,
                         TaskContinuationOptions.ExecuteSynchronously,
                         TaskScheduler.Default);
@@ -125,15 +122,16 @@ public sealed class EventLoop : IDisposable
         }
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
-        // Cancel the accept loop first
         _cts.Cancel();
 
-        // Close listener to unblock AcceptAsync immediately
         try
         {
             _listener.Dispose();
@@ -143,7 +141,6 @@ public sealed class EventLoop : IDisposable
             // Ignore
         }
 
-        // Wait for accept loop to complete (should be fast after listener closed)
         try
         {
             _runTask?.Wait(TimeSpan.FromSeconds(2));
@@ -153,8 +150,6 @@ public sealed class EventLoop : IDisposable
             // Ignore timeout
         }
 
-        // Don't wait for active connections - they will be aborted
-        // The OS will clean up sockets when process exits
         _cts.Dispose();
     }
 

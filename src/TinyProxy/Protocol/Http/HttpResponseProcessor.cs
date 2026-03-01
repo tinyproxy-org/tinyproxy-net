@@ -2,13 +2,15 @@ namespace TinyProxy.Protocol.Http;
 
 /// <summary>
 /// Processes HTTP response headers from remote servers.
-/// Aligns with tinyproxy C's process_server_headers() implementation.
 /// </summary>
 public sealed class HttpResponseProcessor
 {
     private readonly ILogger _logger;
     private readonly Configuration _config;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="HttpResponseProcessor"/> class.
+    /// </summary>
     public HttpResponseProcessor(ILogger logger, Configuration config)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -28,11 +30,9 @@ public sealed class HttpResponseProcessor
 
         try
         {
-            // Read response line: HTTP/1.x CODE STATUS\r\n
             var (statusLineLength, statusCode) = await ReadStatusLineAsync(serverSocket, buffer, token).ConfigureAwait(false);
             totalReceived += statusLineLength;
 
-            // Read all headers
             var headers = new Dictionary<string, ReadOnlySequence<byte>>(StringComparer.OrdinalIgnoreCase);
             totalReceived += await ReadHeadersAsync(serverSocket, buffer, headers, token).ConfigureAwait(false);
 
@@ -64,10 +64,8 @@ public sealed class HttpResponseProcessor
 
             if (read == 0) throw new InvalidOperationException("Connection closed while reading status line");
 
-            // Check for LF (line end)
             if (buffer[position] == (byte)'\n')
             {
-                // Parse status code
                 var statusLine = Encoding.ASCII.GetString(buffer, 0, position);
                 var parts = statusLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
@@ -108,13 +106,10 @@ public sealed class HttpResponseProcessor
             position++;
             totalBytes++;
 
-            // Check for CRLF (end of header line)
             if (position >= 2 && buffer[position - 2] == (byte)'\r' && buffer[position - 1] == (byte)'\n')
             {
-                // Check for empty line (end of headers)
                 if (position - lineStart <= 2) return totalBytes;
 
-                // Parse header line: Name: Value\r\n
                 var headerLine = Encoding.ASCII.GetString(buffer, lineStart, position - lineStart - 2);
                 var colonIndex = headerLine.IndexOf(':');
 
@@ -145,23 +140,18 @@ public sealed class HttpResponseProcessor
         using var ms = new MemoryStream();
         var writer = new StreamWriter(ms, Encoding.ASCII, leaveOpen: true);
 
-        // Apply anonymous filter if enabled
         var anonymousFilter = new AnonymousFilter(_config.AnonymousAllowedHeaders);
 
         foreach (var header in headers)
         {
             var name = header.Key;
 
-            // Skip hop-by-hop headers (aligns with tinyproxy C's remove_connection_headers)
             if (ProxyConstants.HopByHopHeadersSet.Contains(name)) continue;
 
-            // Apply anonymous filtering
             if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(name)) continue;
 
-            // Skip Via header (we'll add it back properly)
             if (name.Equals("Via", StringComparison.OrdinalIgnoreCase)) continue;
 
-            // Write header
             writer.Write($"{name}: ");
             writer.Flush();
             ms.Write(header.Value.ToArray());
@@ -169,13 +159,12 @@ public sealed class HttpResponseProcessor
             writer.Flush();
         }
 
-        // Add Via header if configured (aligns with tinyproxy C's write_via_header)
         if (_config.AddViaHeader)
         {
             string? existingVia = null;
             if (headers.TryGetValue("Via", out var viaValue)) existingVia = Encoding.ASCII.GetString(viaValue.ToArray()).Trim();
 
-            var hostname = _config.ViaProxyName ?? System.Net.Dns.GetHostName();
+            var hostname = _config.ViaProxyName ?? Dns.GetHostName();
             var viaProxyName = string.IsNullOrEmpty(hostname) ? "unknown" : hostname;
 
             string viaHeader;
@@ -187,7 +176,7 @@ public sealed class HttpResponseProcessor
             writer.Write(viaHeader);
         }
 
-        writer.Write("\r\n"); // End of headers
+        writer.Write("\r\n");
         writer.Flush();
 
         return ms.ToArray();

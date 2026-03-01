@@ -2,13 +2,15 @@ namespace TinyProxy.Protocol.Http;
 
 /// <summary>
 /// Handles HTTP chunked transfer encoding.
-/// Aligns with tinyproxy C's pull_client_data_chunked() implementation.
 /// </summary>
 public sealed class ChunkedTransferHandler
 {
     private readonly ILogger _logger;
     private const int BufferSize = 8192;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ChunkedTransferHandler"/> class.
+    /// </summary>
     public ChunkedTransferHandler(ILogger logger)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -30,20 +32,16 @@ public sealed class ChunkedTransferHandler
         {
             while (true)
             {
-                // Read chunk size line
                 var chunkSize = await ReadChunkSizeLineAsync(source, buffer, token).ConfigureAwait(false);
                 if (chunkSize == 0)
                 {
-                    // End of chunked stream - read trailing CRLF
                     await ReadCrLfAsync(source, token).ConfigureAwait(false);
                     break;
                 }
 
-                // Read and forward the chunk data
                 totalBytes += await ReadAndForwardChunkAsync(
                     source, destination, buffer, chunkSize, token).ConfigureAwait(false);
 
-                // Read trailing CRLF after each chunk
                 await ReadCrLfAsync(source, token).ConfigureAwait(false);
             }
 
@@ -67,7 +65,6 @@ public sealed class ChunkedTransferHandler
         var position = 0;
         var maxLineLength = buffer.Length;
 
-        // Read until CRLF
         while (position < maxLineLength)
         {
             var read = await socket.ReceiveAsync(
@@ -77,13 +74,10 @@ public sealed class ChunkedTransferHandler
 
             if (read == 0) throw new InvalidOperationException("Connection closed while reading chunk size");
 
-            // Check for LF (line end)
             if (buffer[position] == (byte)'\n')
             {
-                // Check for CR before LF
-                if (position > 0 && buffer[position - 1] == (byte)'\r') position--; // Don't include CR in the parse
+                if (position > 0 && buffer[position - 1] == (byte)'\r') position--;
 
-                // Parse hex chunk size
                 var hexLine = Encoding.ASCII.GetString(buffer, 0, position);
                 if (!long.TryParse(hexLine, System.Globalization.NumberStyles.HexNumber, null, out var size)) throw new InvalidOperationException($"Invalid chunk size: {hexLine}");
 
@@ -122,7 +116,6 @@ public sealed class ChunkedTransferHandler
             bytesRemaining -= read;
             totalRead += read;
 
-            // Forward the data immediately
             await destination.SendAllAsync(
                 new Memory<byte>(buffer, 0, read),
                 token).ConfigureAwait(false);

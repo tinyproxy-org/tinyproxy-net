@@ -1,15 +1,19 @@
 # TinyProxy.NET
 
-TinyProxy.NET 是对 [tinyproxy](https://github.com/tinyproxy/tinyproxy) 的 .NET 实现，目标是保持轻量、高性能和可维护性。
+This project is a .NET rewrite of the upstream [tinyproxy](https://github.com/tinyproxy/tinyproxy).
 
-## 当前能力
+TinyProxy.NET is a lightweight HTTP/HTTPS proxy server implemented on .NET, focused on predictable performance and maintainable code.
 
-- HTTP/1.0、HTTP/1.1 转发
-- HTTPS CONNECT 隧道
-- ACL、URL 过滤、Basic Auth
-- 透明代理、反向代理、上游代理（HTTP / SOCKS）
+## Features
 
-## 快速开始
+- HTTP/1.0 and HTTP/1.1 forwarding
+- HTTPS CONNECT tunneling
+- Access control (ACL), URL filtering, and Basic Authentication
+- Transparent proxy mode
+- Reverse proxy routing
+- Upstream proxy support (HTTP, SOCKS4, SOCKS5)
+
+## Build, Test, Run
 
 ```bash
 dotnet build src/TinyProxy/TinyProxy.csproj

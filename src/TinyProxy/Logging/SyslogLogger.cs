@@ -2,8 +2,6 @@ namespace TinyProxy.Logging;
 
 /// <summary>
 /// Syslog logger implementation.
-/// Aligns with tinyproxy C's syslog support in log.c.
-///
 /// Supports RFC 5424 syslog format over UDP.
 /// </summary>
 public sealed class SyslogLogger : ILogger, IDisposable
@@ -29,6 +27,9 @@ public sealed class SyslogLogger : ILogger, IDisposable
     // Default facility (user-level messages)
     private const int FacilityUser = 1;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SyslogLogger"/> class.
+    /// </summary>
     public SyslogLogger(string? server = null, int port = 514, string? appName = null)
     {
         _server = server;
@@ -49,31 +50,49 @@ public sealed class SyslogLogger : ILogger, IDisposable
             }
     }
 
+    /// <summary>
+    /// Executes log critical.
+    /// </summary>
     public void LogCritical(string message)
     {
         Log(SeverityCritical, "CRITICAL", message);
     }
 
+    /// <summary>
+    /// Executes log error.
+    /// </summary>
     public void LogError(string message)
     {
         Log(SeverityError, "ERROR", message);
     }
 
+    /// <summary>
+    /// Executes log warning.
+    /// </summary>
     public void LogWarning(string message)
     {
         Log(SeverityWarning, "WARNING", message);
     }
 
+    /// <summary>
+    /// Executes log notice.
+    /// </summary>
     public void LogNotice(string message)
     {
         Log(SeverityNotice, "NOTICE", message);
     }
 
+    /// <summary>
+    /// Executes log info.
+    /// </summary>
     public void LogInfo(string message)
     {
         Log(SeverityInfo, "INFO", message);
     }
 
+    /// <summary>
+    /// Executes log connect.
+    /// </summary>
     public void LogConnect(string message)
     {
         Log(SeverityInfo, "CONNECT", message);
@@ -97,7 +116,7 @@ public sealed class SyslogLogger : ILogger, IDisposable
 
     /// <summary>
     /// Formats a message according to RFC 5424 syslog format.
-    /// Format: <PRIVAL>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG
+    /// Format: <c>&lt;PRIVAL&gt;VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG</c>.
     /// </summary>
     private string FormatSyslogMessage(int severity, string level, string message)
     {
@@ -113,6 +132,9 @@ public sealed class SyslogLogger : ILogger, IDisposable
         return $"<{pri}>1 {timestamp} {_hostname} {_appName} - - - [{level}] {escapedMessage}";
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

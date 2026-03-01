@@ -2,7 +2,6 @@ namespace TinyProxy.Core;
 
 /// <summary>
 /// Extension methods for Socket operations.
-/// Aligns with tinyproxy C's sock.c
 /// </summary>
 public static class SocketExtensions
 {
@@ -64,7 +63,6 @@ public static class SocketExtensions
 
     /// <summary>
     /// Connects to endpoint with timeout.
-    /// Aligns with tinyproxy C's opensock().
     /// </summary>
     public static async Task ConnectAsync(
         this Socket socket,
@@ -88,7 +86,6 @@ public static class SocketExtensions
 
     /// <summary>
     /// Connects to endpoint with timeout and binds to a specific local address.
-    /// Aligns with tinyproxy C's opensock() with bind_to parameter.
     /// </summary>
     public static async Task ConnectAndBindAsync(
         this Socket socket,
@@ -98,7 +95,6 @@ public static class SocketExtensions
         string? bindAddress,
         CancellationToken cancellationToken = default)
     {
-        // Bind to specific address if requested
         if (!string.IsNullOrEmpty(bindAddress))
         {
             var bindEndPoint = new IPEndPoint(IPAddress.Parse(bindAddress), 0);
@@ -111,25 +107,21 @@ public static class SocketExtensions
     /// <summary>
     /// Binds socket to the same IP as the incoming connection.
     /// This is useful for multi-homed servers.
-    /// Aligns with tinyproxy C's bindsame functionality.
     /// </summary>
     public static void BindToSameIp(this Socket serverSocket, Socket clientSocket, Configuration config)
     {
-        // Only bind if BindSame is enabled
         if (!config.BindSame) return;
 
-        // Get the local endpoint of the client connection (the IP client connected to)
         if (clientSocket.LocalEndPoint is not IPEndPoint localEndPoint) return;
 
         try
         {
-            // Bind the server socket to the same IP
             var bindEndPoint = new IPEndPoint(localEndPoint.Address, 0);
             serverSocket.Bind(bindEndPoint);
         }
         catch
         {
-            // Silently fail if binding fails
+            // Ignore bind failures and continue with default outbound binding.
         }
     }
 }

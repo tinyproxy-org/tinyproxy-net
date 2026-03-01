@@ -2,12 +2,11 @@ namespace TinyProxy.Protocol;
 
 /// <summary>
 /// Interface for handling different proxy protocols.
-/// Aligns with tinyproxy C's separation of HTTP vs CONNECT.
 /// </summary>
 public interface IProtocolHandler
 {
     /// <summary>
-    /// Gets the protocol name for logging.
+    /// Gets protocol name.
     /// </summary>
     string ProtocolName { get; }
 

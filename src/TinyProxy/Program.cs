@@ -13,7 +13,6 @@ internal class Program
 
         var config = loadedConfig;
 
-        // Create logger (syslog if configured, otherwise console)
         var logger = CreateLogger(config);
 
         logger.LogInfo($"TinyProxy.NET starting on {config.ListenAddress}:{config.ListenPort}");
@@ -21,30 +20,18 @@ internal class Program
         var stats = new Stats();
         var accessLogger = new AccessLogger(config, logger);
         var connectionManager = new ConnectionManager(config, logger);
-
-        // Shared loop detector for all connections
-        // Aligns with tinyproxy C's loop.c functionality
         var loopDetector = new LoopDetector();
-
-        // Initialize error pages with configuration
-        // Aligns with tinyproxy C's html-error.c functionality
         Protocol.HtmlErrorPages.Initialize(config);
 
-        // PID file management - aligns with tinyproxy C's pidfile
         var pidFileManager = new PidFileManager(logger, config.PidFile);
 
-        // Configuration hot-reload - aligns with tinyproxy C's SIGHUP handling
         var currentConfig = config;
         var configReloader = new ConfigReloader(logger, configPath, newConfig =>
         {
             currentConfig = newConfig;
-            // Reinitialize error pages with new configuration
             Protocol.HtmlErrorPages.Initialize(newConfig);
             logger.LogInfo("Configuration reloaded");
         });
-        // ConfigReloader starts automatically in constructor
-
-        // Use a wrapper for config access that can be updated
         var configAccessor = new ConfigurationAccessor(() => currentConfig);
 
         var eventLoop = new EventLoop(
@@ -60,7 +47,6 @@ internal class Program
 
         logger.LogInfo("Press Ctrl+C to exit...");
 
-        // Wait for Ctrl+C
         var tcs = new TaskCompletionSource<bool>();
         Console.CancelKeyPress += async (s, e) =>
         {
@@ -70,7 +56,6 @@ internal class Program
             tcs.TrySetResult(true);
         };
 
-        // Add AppDomain unload handler for non-Ctrl+C shutdown paths
         AppDomain.CurrentDomain.ProcessExit += (s, e) =>
         {
             // ProcessExit is synchronous, do sync cleanup
@@ -82,8 +67,6 @@ internal class Program
 
     private static string GetConfigPath(string[] args)
     {
-        // Check for config file argument
-        // Supports: -c filename or just filename
         for (var i = 0; i < args.Length; i++)
         {
             if (args[i] == "-c" && i + 1 < args.Length) return args[i + 1];
@@ -169,7 +152,6 @@ internal class Program
 
         try
         {
-            // Get current config (supports hot-reload)
             var config = configAccessor.GetCurrent();
 
             using var connection = new Connection(socket, logger, config, stats, accessLogger, loopDetector);

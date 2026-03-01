@@ -7,42 +7,42 @@ namespace TinyProxy.Logging;
 public interface IStructuredLogger
 {
     /// <summary>
-    /// Logs a debug message.
+    /// Executes log debug.
     /// </summary>
     void LogDebug(string message, params object?[] args);
 
     /// <summary>
-    /// Logs an info message.
+    /// Executes log info.
     /// </summary>
     void LogInfo(string message, params object?[] args);
 
     /// <summary>
-    /// Logs a warning message.
+    /// Executes log warning.
     /// </summary>
     void LogWarning(string message, params object?[] args);
 
     /// <summary>
-    /// Logs an error message with optional exception.
+    /// Executes log error.
     /// </summary>
     void LogError(string message, Exception? ex, params object?[] args);
 
     /// <summary>
-    /// Logs a critical message.
+    /// Executes log critical.
     /// </summary>
     void LogCritical(string message);
 
     /// <summary>
-    /// Logs a connection event.
+    /// Executes log connection.
     /// </summary>
     void LogConnection(string direction, string endpoint);
 
     /// <summary>
-    /// Logs an HTTP request.
+    /// Executes log request.
     /// </summary>
     void LogRequest(string method, string uri, string version);
 
     /// <summary>
-    /// Logs an access event.
+    /// Executes log access.
     /// </summary>
     void LogAccess(string clientIp, string method, string uri, int statusCode, long bytes);
 }

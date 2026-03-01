@@ -4,7 +4,6 @@ namespace TinyProxy.Core;
 
 /// <summary>
 /// POSIX daemon process support.
-/// Aligns with tinyproxy C's daemon.c functionality.
 /// </summary>
 public static class Daemon
 {
@@ -12,7 +11,6 @@ public static class Daemon
     /// Makes the calling process a daemon.
     /// Forks twice to ensure the process is not a session leader,
     /// calls setsid() to create a new session, and closes standard file descriptors.
-    /// Aligns with tinyproxy C's makedaemon() function.
     /// </summary>
     public static void MakeDaemon()
     {
@@ -101,7 +99,6 @@ public static class Daemon
 
     /// <summary>
     /// Sets a signal handler.
-    /// Aligns with tinyproxy C's set_signal_handler() function.
     /// </summary>
     public static void SetSignalHandler(Signal signal, SignalHandler handler)
     {
@@ -224,7 +221,6 @@ public static class Daemon
 
     /// <summary>
     /// Signal numbers.
-    /// Aligns with tinyproxy C's signal handling.
     /// </summary>
     public enum Signal
     {
@@ -258,7 +254,7 @@ public static class Daemon
 
     /// <summary>
     /// Open flags for Unix open() system call.
-    /// Using hex values instead of octal for compatibility.
+    /// Values are defined in hexadecimal form.
     /// </summary>
     [Flags]
     private enum UnixOpenFlags

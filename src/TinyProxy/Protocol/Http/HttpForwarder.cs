@@ -14,6 +14,9 @@ public sealed class HttpForwarder
     private readonly string _clientIp;
     private readonly LoopDetector? _loopDetector;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="HttpForwarder"/> class.
+    /// </summary>
     public HttpForwarder(
         ILogger logger,
         Configuration config,
@@ -30,6 +33,9 @@ public sealed class HttpForwarder
         _loopDetector = loopDetector;
     }
 
+    /// <summary>
+    /// Executes forward async.
+    /// </summary>
     public async ValueTask ForwardAsync(
         Connection connection,
         HttpRequest request,
@@ -66,7 +72,6 @@ public sealed class HttpForwarder
             return;
         }
 
-        // Check request body size limit
         if (_config.MaxRequestSize > 0 && request.ContentLength.HasValue && request.ContentLength.Value > _config.MaxRequestSize)
         {
             _stats.IncrementFailedRequests();
@@ -86,7 +91,6 @@ public sealed class HttpForwarder
 
         try
         {
-            // Check if upstream proxy is configured
             if (upstream != null)
             {
                 serverSocket = await ConnectViaUpstreamAsync(upstream, host, port, connection.ClientSocket, token).ConfigureAwait(false);
@@ -94,11 +98,8 @@ public sealed class HttpForwarder
             else
             {
                 serverSocket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-
-                // Apply BindSame if enabled - aligns with tinyproxy C's bindsame
                 serverSocket.BindToSameIp(connection.ClientSocket, _config);
 
-                // Apply BindAddresses if configured
                 if (_config.BindAddresses.Count > 0)
                 {
                     var bindAddress = _config.BindAddresses.FirstOrDefault();
@@ -118,13 +119,11 @@ public sealed class HttpForwarder
             requestIdleTimeoutScope = new IdleTimeoutScope(_config.Timeout, token);
             var requestIoToken = requestIdleTimeoutScope.Token;
 
-            // Build modified request
             var useAbsoluteUri = upstream?.Type == UpstreamProxyType.Http;
             var requestBuffer = BuildForwardRequest(request, host, port, useAbsoluteUri);
             await serverSocket.SendAllAsync(requestBuffer, requestIoToken).ConfigureAwait(false);
             requestIdleTimeoutScope.Touch();
 
-            // Forward request body (pre-read bytes + remaining bytes from client socket).
             await ForwardRequestBodyAsync(
                 connection.ClientSocket,
                 serverSocket,
@@ -132,7 +131,6 @@ public sealed class HttpForwarder
                 requestIoToken,
                 requestIdleTimeoutScope.Touch).ConfigureAwait(false);
 
-            // Read response from server and forward to client
             (bytesSent, bytesReceived) = await ForwardResponseAsync(
                 serverSocket,
                 connection.ClientSocket,
@@ -144,8 +142,6 @@ public sealed class HttpForwarder
             _stats.AddBytesSent(bytesSent);
             _stats.AddBytesReceived(bytesReceived);
 
-            // Close server socket after response is complete
-            // This ensures we don't wait for keep-alive connections
             serverSocket.Shutdown(SocketShutdown.Both);
         }
         catch (RequestBodyTooLargeException)
@@ -190,27 +186,23 @@ public sealed class HttpForwarder
             {
                 statusCode = 500;
                 if (!ex.ResponseStarted)
-                {
                     await SendErrorAsync(
                         connection.ClientSocket,
                         500,
                         "Internal Server Error",
                         "Server response timeout",
                         token).ConfigureAwait(false);
-                }
             }
             else
             {
                 statusCode = 504;
                 if (!ex.ResponseStarted)
-                {
                     await SendErrorAsync(
                         connection.ClientSocket,
                         504,
                         "Gateway Timeout",
                         "Server response timeout",
                         token).ConfigureAwait(false);
-                }
             }
         }
         catch (TimeoutException)
@@ -297,14 +289,12 @@ public sealed class HttpForwarder
         {
             requestIdleTimeoutScope?.Dispose();
 
-            // Always dispose server socket
             try
             {
                 serverSocket?.Dispose();
             }
             catch (SocketException)
             {
-                // Socket already closed or invalid
             }
 
             LogAccess(connection, request, statusCode, bytesSent);
@@ -318,14 +308,12 @@ public sealed class HttpForwarder
         Socket clientSocket,
         CancellationToken token)
     {
-        // Handle SOCKS upstream proxies
         if (upstream.Type == UpstreamProxyType.Socks4 || upstream.Type == UpstreamProxyType.Socks5)
         {
             var socksProxy = new SocksUpstreamProxy(_logger, upstream, _config.Timeout);
             return await socksProxy.ConnectAsync(targetHost, targetPort, token, clientSocket, _config).ConfigureAwait(false);
         }
 
-        // HTTP upstream proxy
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
 
         socket.BindToSameIp(clientSocket, _config);
@@ -347,9 +335,6 @@ public sealed class HttpForwarder
 
         await socket.ConnectAsync(upstream.Host, upstream.Port, _config.Timeout, token).ConfigureAwait(false);
         RecordPotentialLoopEndpoint(socket, upstream.Port);
-
-        // Note: For HTTP proxying, the request will be formatted with absolute URI
-        // The upstream proxy will handle the actual connection to target
         return socket;
     }
 
@@ -362,7 +347,7 @@ public sealed class HttpForwarder
 
     private byte[] BuildForwardRequest(HttpRequest request, string host, int port, bool useAbsoluteUri)
     {
-        // Use StringBuilder for better performance with string concatenation
+        // PERF: StringBuilder avoids repeated string allocations when composing headers.
         var sb = StringBuilderCache.Acquire();
         var upstream = _config.ResolveUpstreamProxy(host);
 
@@ -377,12 +362,9 @@ public sealed class HttpForwarder
             sb.Append(ProxyConstants.Crlf);
             sb.Append("Host: ").Append(FormatHostHeader(host, port)).Append(ProxyConstants.Crlf);
 
-            // Headers - filter and modify
             var hopByHopHeaders = ProxyConstants.HopByHopHeadersSet;
             var connectionTokenHeaders = ExtractConnectionTokenHeaders(request);
             string? upstreamViaHeader = null;
-
-            // Apply anonymous filter if enabled (aligns with tinyproxy C's anonymous.c)
             var anonymousFilter = new AnonymousFilter(_config.AnonymousAllowedHeaders);
 
             void AppendFilteredHeader(string name, ReadOnlySequence<byte> value)
@@ -397,7 +379,7 @@ public sealed class HttpForwarder
                 if (connectionTokenHeaders.Contains(name))
                     return;
 
-                // Host is rebuilt from parsed target to match tinyproxy behavior.
+                // Rebuild Host from parsed target to keep a single canonical value.
                 if (string.Equals(name, "Host", StringComparison.OrdinalIgnoreCase))
                     return;
 
@@ -409,28 +391,22 @@ public sealed class HttpForwarder
                     return;
                 }
 
-                // Apply anonymous filtering (aligns with tinyproxy C's anonymous_search)
+
                 if (_config.IsAnonymousEnabled && !anonymousFilter.IsHeaderAllowed(name)) return;
 
-                // Write header - use span-based parsing to avoid allocation when possible
                 sb.Append(name).Append(": ");
                 sb.Append(ReadHeaderValue(value));
                 sb.Append(ProxyConstants.Crlf);
             }
 
             if (request.HeaderLines.Count > 0)
-            {
                 foreach (var header in request.HeaderLines)
                     AppendFilteredHeader(header.Key, header.Value);
-            }
             else
-            {
                 foreach (var header in request.Headers)
                     AppendFilteredHeader(header.Key, header.Value);
-            }
 
-            // Add proxy authentication only for HTTP upstream requests.
-            // tinyproxy C only emits Proxy-Authorization for PT_HTTP upstream.
+            // Only emit Proxy-Authorization for HTTP upstream forwarding.
             if (useAbsoluteUri &&
                 upstream?.Type == UpstreamProxyType.Http &&
                 !string.IsNullOrEmpty(upstream.Username))
@@ -441,8 +417,6 @@ public sealed class HttpForwarder
                 sb.Append(ProxyConstants.Crlf);
             }
 
-            // Add Via header if configured
-            // Aligns with tinyproxy C by appending current proxy to existing Via chain.
             if (_config.AddViaHeader)
             {
                 var viaName = string.IsNullOrWhiteSpace(_config.ViaProxyName)
@@ -457,13 +431,7 @@ public sealed class HttpForwarder
             }
 
             sb.Append("Connection: close").Append(ProxyConstants.Crlf);
-
-            // Add X-Tinyproxy header if configured
-            // Aligns with tinyproxy C's AddXTinyproxy option
             if (_config.AddXTinyproxyHeader) sb.Append("X-Tinyproxy: ").Append(_clientIp).Append(ProxyConstants.Crlf);
-
-            // Add custom headers from configuration
-            // Aligns with tinyproxy C's add_headers functionality
             foreach (var header in _config.CustomHeaders)
             {
                 if (connectionTokenHeaders.Contains(header.Name))
@@ -480,7 +448,7 @@ public sealed class HttpForwarder
                 sb.Append(ProxyConstants.Crlf);
             }
 
-            sb.Append(ProxyConstants.Crlf); // End of headers
+            sb.Append(ProxyConstants.Crlf);
 
             return Encoding.ASCII.GetBytes(StringBuilderCache.GetStringAndRelease(sb));
         }
@@ -552,11 +520,11 @@ public sealed class HttpForwarder
         var dotIndex = versionPart.IndexOf('.');
         if (dotIndex <= 0 || dotIndex >= versionPart.Length - 1) return false;
 
-        return TryParseUnsignedPrefix(versionPart[..dotIndex], requireWholeToken: true, out major) &&
-               TryParseUnsignedPrefix(versionPart[(dotIndex + 1)..], requireWholeToken: false, out minor);
+        return TryParseUnsignedPrefix(versionPart[..dotIndex], true, out major) &&
+               TryParseUnsignedPrefix(versionPart[(dotIndex + 1)..], false, out minor);
     }
 
-    // Matches tinyproxy C's sscanf("HTTP/%u.%u"): numeric major/minor with optional trailing chars after minor.
+    // Parse an unsigned numeric prefix; optionally allow a trailing suffix.
     private static bool TryParseUnsignedPrefix(ReadOnlySpan<char> value, bool requireWholeToken, out int number)
     {
         number = 0;
@@ -571,7 +539,7 @@ public sealed class HttpForwarder
             var digit = current - '0';
             if (number > (int.MaxValue - digit) / 10) return false;
 
-            number = (number * 10) + digit;
+            number = number * 10 + digit;
             consumed++;
         }
 
@@ -588,7 +556,7 @@ public sealed class HttpForwarder
         CancellationToken token,
         Action? onActivity = null)
     {
-        // tinyproxy C behavior (reqs.c): Content-Length takes precedence over chunked.
+        // Prefer Content-Length framing when present; otherwise process chunked body.
         if (request.ContentLength.HasValue)
         {
             if (request.ContentLength.Value <= 0) return;
@@ -643,10 +611,8 @@ public sealed class HttpForwarder
                 if (_config.MaxRequestSize > 0 && totalPayloadBytes > _config.MaxRequestSize)
                     throw new RequestBodyTooLargeException();
 
-                // Forward chunk payload.
                 await CopyExactlyAsync(reader, serverSocket, copyBuffer, chunkSize, token, onActivity).ConfigureAwait(false);
 
-                // Forward and validate chunk terminator (CRLF or LF).
                 var chunkTerminatorLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
                 if (!IsEmptyLine(lineBuffer, chunkTerminatorLength))
                     throw new InvalidOperationException("Invalid chunk terminator.");
@@ -796,7 +762,6 @@ public sealed class HttpForwarder
 
     /// <summary>
     /// Forwards response data from server to client.
-    /// Parses response framing so forwarding can complete even if upstream keeps the connection alive.
     /// </summary>
     private async Task<(long sent, long received)> ForwardResponseAsync(
         Socket server,
@@ -810,7 +775,7 @@ public sealed class HttpForwarder
         var headerBuffer = ArrayPool<byte>.Shared.Rent(ProxyConstants.InitialHeaderBufferSize);
         long totalSent = 0;
         long totalReceived = 0;
-        ReadOnlySequence<byte> pendingPrefetched = ReadOnlySequence<byte>.Empty;
+        var pendingPrefetched = ReadOnlySequence<byte>.Empty;
         var interimResponsesForwarded = 0;
         var viaProtocolToken = GetViaProtocolToken(requestVersion);
         var omitResponseHeaders = IsHttp09Request(requestVersion);
@@ -1128,7 +1093,6 @@ public sealed class HttpForwarder
 
             var chunkSize = ParseChunkSize(lineBuffer.AsMemory(0, chunkSizeLineLength));
             if (chunkSize == 0)
-            {
                 while (true)
                 {
                     var trailerLength = await ReadLineAsync(reader, lineBuffer, token, onActivity).ConfigureAwait(false);
@@ -1137,7 +1101,6 @@ public sealed class HttpForwarder
                     totalSent += trailerLength;
                     if (IsEmptyLine(lineBuffer, trailerLength)) return totalSent;
                 }
-            }
 
             await CopyExactlyAsync(reader, destination, copyBuffer, chunkSize, token, onActivity).ConfigureAwait(false);
             totalSent += chunkSize;
@@ -1244,7 +1207,7 @@ public sealed class HttpForwarder
         if (!TryParseStatusCode(statusLine, out var statusCode))
             throw new InvalidOperationException("Invalid HTTP status line.");
 
-        bool isChunked = false;
+        var isChunked = false;
         long? contentLength = null;
         var activeHeader = ParsedResponseHeader.None;
         var doubleCgiDetected = false;
@@ -1280,15 +1243,11 @@ public sealed class HttpForwarder
             {
                 var continuation = TextUtils.Trim(line);
                 if (activeHeader == ParsedResponseHeader.TransferEncoding)
-                {
                     isChunked = TextUtils.IndexOfIgnoreCase(continuation, "chunked"u8) >= 0 || isChunked;
-                }
                 else if (activeHeader == ParsedResponseHeader.ContentLength &&
                          !contentLength.HasValue &&
                          TryParseNonNegativeContentLength(continuation, out var continuedLength))
-                {
                     contentLength = continuedLength;
-                }
 
                 offset = lineEnd + 1;
                 continue;
@@ -1370,9 +1329,8 @@ public sealed class HttpForwarder
         if (name.Length != expected.Length) return false;
 
         for (var i = 0; i < name.Length; i++)
-        {
-            if (!EqualsIgnoreCaseAscii(name[i], expected[i])) return false;
-        }
+            if (!EqualsIgnoreCaseAscii(name[i], expected[i]))
+                return false;
 
         return true;
     }
@@ -1452,12 +1410,10 @@ public sealed class HttpForwarder
                 }
 
                 if (!string.IsNullOrEmpty(reverseMagicCookiePath))
-                {
                     sb.Append("Set-Cookie: yummy_magical_cookie=")
                         .Append(reverseMagicCookiePath)
                         .Append("; path=/")
                         .Append(ProxyConstants.Crlf);
-                }
 
                 sb.Append(ProxyConstants.Crlf);
                 return Encoding.ASCII.GetBytes(StringBuilderCache.GetStringAndRelease(sb));
@@ -1635,6 +1591,7 @@ public sealed class HttpForwarder
             if (statusCode == 101) return ResponseBodyMode.UpgradedTunnel;
             return ResponseBodyMode.None;
         }
+
         if (isChunked) return ResponseBodyMode.Chunked;
         if (contentLength.HasValue) return ResponseBodyMode.ContentLength;
         return ResponseBodyMode.UntilClose;
@@ -1653,11 +1610,9 @@ public sealed class HttpForwarder
         if (request.HeaderLines.Count > 0)
         {
             foreach (var (name, value) in request.HeaderLines)
-            {
                 if (name.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
                     name.Equals("Proxy-Connection", StringComparison.OrdinalIgnoreCase))
                     AddConnectionTokenHeaders(value, result);
-            }
         }
         else
         {
@@ -1721,10 +1676,10 @@ public sealed class HttpForwarder
         return value switch
         {
             (byte)'(' or (byte)')' or (byte)'<' or (byte)'>' or (byte)'@' or
-            (byte)',' or (byte)';' or (byte)':' or (byte)'\\' or (byte)'"' or
-            (byte)'/' or (byte)'[' or (byte)']' or (byte)'?' or (byte)'=' or
-            (byte)'{' or (byte)'}' or (byte)' ' or (byte)'\t' or (byte)'\r' or
-            (byte)'\n' => true,
+                (byte)',' or (byte)';' or (byte)':' or (byte)'\\' or (byte)'"' or
+                (byte)'/' or (byte)'[' or (byte)']' or (byte)'?' or (byte)'=' or
+                (byte)'{' or (byte)'}' or (byte)' ' or (byte)'\t' or (byte)'\r' or
+                (byte)'\n' => true,
             _ => false
         };
     }
@@ -1734,9 +1689,9 @@ public sealed class HttpForwarder
         return value switch
         {
             '(' or ')' or '<' or '>' or '@' or
-            ',' or ';' or ':' or '\\' or '"' or
-            '/' or '[' or ']' or '?' or '=' or
-            '{' or '}' or ' ' or '\t' or '\r' or '\n' => true,
+                ',' or ';' or ':' or '\\' or '"' or
+                '/' or '[' or ']' or '?' or '=' or
+                '{' or '}' or ' ' or '\t' or '\r' or '\n' => true,
             _ => false
         };
     }
@@ -1799,8 +1754,8 @@ public sealed class HttpForwarder
             if (scheme.Equals("http".AsSpan(), StringComparison.OrdinalIgnoreCase) ||
                 scheme.Equals("https".AsSpan(), StringComparison.OrdinalIgnoreCase))
             {
-                // tinyproxy C strips userinfo before building outbound request target.
-                // Do the same to avoid forwarding credentials to upstream.
+                // Strip userinfo to avoid forwarding credentials in the request target.
+                // SECURITY: avoid forwarding URI userinfo as credentials.
                 if (Uri.TryCreate(uri, UriKind.Absolute, out var absoluteHttpUri) &&
                     !string.IsNullOrEmpty(absoluteHttpUri.UserInfo))
                 {
@@ -1818,7 +1773,7 @@ public sealed class HttpForwarder
                 return uri;
             }
 
-            // tinyproxy C rewrites upstream absolute-form to http://host:port/path.
+            // Rewrite non-HTTP(S) absolute URIs into canonical http://host:port/path form.
             if (Uri.TryCreate(uri, UriKind.Absolute, out var absoluteUri))
             {
                 var pathAndQuery = absoluteUri.GetComponents(UriComponents.PathAndQuery, UriFormat.UriEscaped);
@@ -1827,8 +1782,7 @@ public sealed class HttpForwarder
             }
         }
 
-        // Build absolute URI
-        // Omit port for standard ports (80 for http, 443 for https) - matches tinyproxy C behavior
+        // Use canonical HTTP URI form; default port 80 is omitted.
         var portSuffix = port == 80 ? "" : $":{port}";
         return $"http://{host}{portSuffix}{uri}";
     }
@@ -1850,7 +1804,7 @@ public sealed class HttpForwarder
                 return false;
             }
 
-            // tinyproxy C only accepts ftp:// when an upstream proxy is configured.
+            // Accept ftp:// targets only when upstream proxying is configured.
             if (!_config.HasUpstreamProxyConfigured)
             {
                 host = string.Empty;

@@ -6,281 +6,231 @@ namespace TinyProxy.Config;
 public sealed record Configuration
 {
     /// <summary>
-    /// Gets the listen address.
+    /// Gets or sets listen address.
     /// </summary>
     public string ListenAddress { get; init; } = "127.0.0.1";
 
     /// <summary>
-    /// Gets the listen port.
+    /// Gets or sets listen port.
     /// </summary>
     public ushort ListenPort { get; init; } = ProxyConstants.DefaultPort;
 
     /// <summary>
-    /// Gets the maximum number of concurrent clients.
+    /// Gets or sets max clients.
     /// </summary>
     public int MaxClients { get; init; } = ProxyConstants.DefaultMaxClients;
 
     /// <summary>
-    /// Gets the maximum number of concurrent connections per IP address.
     /// Set to 0 to disable per-IP limiting.
     /// </summary>
     public int MaxClientsPerIp { get; init; } = ProxyConstants.DefaultMaxClientsPerIp;
 
     /// <summary>
-    /// Gets the timeout for connections.
+    /// Gets or sets request processing timeout.
     /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(ProxyConstants.DefaultConnectionTimeoutSeconds);
 
     /// <summary>
-    /// Gets the idle timeout for CONNECT tunnels.
+    /// Gets or sets CONNECT tunnel idle timeout.
     /// </summary>
     public TimeSpan ConnectIdleTimeout { get; init; } = TimeSpan.FromSeconds(ProxyConstants.DefaultConnectIdleTimeoutSeconds);
 
     /// <summary>
-    /// Gets the maximum allowed request body size in bytes.
     /// Set to 0 to disable limit (not recommended for production).
     /// </summary>
     public long MaxRequestSize { get; init; } = ProxyConstants.DefaultMaxRequestSize;
 
     /// <summary>
-    /// Gets the set of allowed IP addresses/patterns.
     /// Supports: IP, CIDR (e.g., 192.168.1.0/24), wildcard (e.g., 192.168.*.*), domain suffix (.example.com).
-    /// Aligns with tinyproxy C's ACL functionality.
     /// </summary>
     public HashSet<string> AllowIPs { get; init; } = new();
 
     /// <summary>
-    /// Gets the set of denied IP addresses/patterns.
     /// Supports: IP, CIDR, wildcard, domain suffix.
-    /// Aligns with tinyproxy C's ACL functionality.
     /// </summary>
     public HashSet<string> DenyIPs { get; init; } = new();
 
     /// <summary>
-    /// Gets ordered ACL rules as they appear in configuration.
-    /// Aligns with tinyproxy C's first-match ACL list semantics.
+    /// Gets or sets ordered ACL rules.
     /// </summary>
     public List<AclRuleConfig> AccessRules { get; init; } = new();
 
     /// <summary>
-    /// Gets the filter patterns for URL filtering.
     /// Supports both regex and glob patterns (*, ?).
-    /// Aligns with tinyproxy C's filter.c.
     /// </summary>
     public List<string> FilterPatterns { get; init; } = new();
 
     /// <summary>
-    /// Gets the path to the filter file containing URL patterns.
     /// When set, filter patterns are loaded from this file.
     /// The file is watched for changes and automatically reloaded.
-    /// Aligns with tinyproxy C's Filter option.
     /// </summary>
     public string? FilterFile { get; init; }
 
     /// <summary>
-    /// Gets whether filter patterns are case-sensitive.
-    /// Aligns with tinyproxy C's FILTER_OPT_CASESENSITIVE.
+    /// Gets a value indicating whether filter case sensitive.
     /// </summary>
     public bool FilterCaseSensitive { get; init; } = false;
 
     /// <summary>
-    /// Gets whether to use glob pattern matching instead of regex.
-    /// Aligns with tinyproxy C's FILTER_OPT_TYPE_FNMATCH.
+    /// Gets a value indicating whether filter use glob.
     /// </summary>
     public bool FilterUseGlob { get; init; } = false;
 
     /// <summary>
-    /// Gets whether filtering matches full URL (true) or only host/domain (false).
-    /// Aligns with tinyproxy C's FILTER_OPT_URL / FilterURLs directive.
+    /// Gets a value indicating whether filter urls.
     /// </summary>
     public bool FilterUrls { get; init; } = false;
 
     /// <summary>
-    /// Gets the allowed CONNECT ports.
     /// If empty, all ports are allowed.
-    /// Aligns with tinyproxy C's connect-ports.c.
     /// </summary>
     public HashSet<ushort> AllowedConnectPorts { get; init; } = new();
 
     /// <summary>
-    /// Gets the upstream proxy configuration.
-    /// Aligns with tinyproxy C's upstream.c.
+    /// Gets or sets upstream proxy.
     /// </summary>
     public UpstreamProxyConfig? UpstreamProxy { get; init; }
 
     /// <summary>
-    /// Gets ordered upstream proxy rules.
     /// Rules are evaluated in list order and may include bypass ("none") entries.
-    /// Aligns with tinyproxy C's upstream list and upstream_get() matching order.
     /// </summary>
     public List<UpstreamProxyRuleConfig> UpstreamProxyRules { get; init; } = new();
 
     /// <summary>
-    /// Gets the log file path.
+    /// Gets or sets log file.
     /// </summary>
     public string? LogFile { get; init; }
 
     /// <summary>
-    /// Gets the basic authentication configuration (single user).
     /// For multiple users, use BasicAuthUsers instead.
     /// </summary>
     public BasicAuthConfig? BasicAuth { get; init; }
 
     /// <summary>
-    /// Gets the list of basic authentication users.
     /// Supports multiple user credentials.
     /// </summary>
     public List<BasicAuthUser> BasicAuthUsers { get; init; } = new();
 
     /// <summary>
-    /// Gets whether to add Via header.
-    /// Aligns with tinyproxy C's Via header handling in reqs.c.
+    /// Gets a value indicating whether add via header.
     /// </summary>
     public bool AddViaHeader { get; init; } = true;
 
     /// <summary>
-    /// Gets the custom proxy name for Via header.
-    /// If null, uses system hostname (aligns with tinyproxy C).
+    /// Gets or sets via proxy name.
     /// </summary>
     public string? ViaProxyName { get; init; }
 
     /// <summary>
-    /// Gets whether to add X-Tinyproxy header.
+    /// Gets a value indicating whether add x tinyproxy header.
     /// </summary>
     public bool AddXTinyproxyHeader { get; init; } = false;
 
     /// <summary>
-    /// Gets whether to filter URLs by default (deny all unless allowed).
-    /// Aligns with tinyproxy C's FILTER_OPT_DEFAULT_DENY.
+    /// Gets a value indicating whether filter default deny.
     /// </summary>
     public bool FilterDefaultDeny { get; init; } = false;
 
     /// <summary>
-    /// Gets whether to enable verbose logging.
+    /// Gets a value indicating whether verbose.
     /// </summary>
     public bool Verbose { get; init; } = true;
 
     /// <summary>
-    /// Gets the allowed headers for anonymous mode.
     /// When non-empty, only these headers are allowed to pass through to the server.
-    /// Aligns with tinyproxy C's anonymous.c.
     /// </summary>
     public HashSet<string> AnonymousAllowedHeaders { get; init; } = new();
 
     /// <summary>
-    /// Gets whether anonymous mode is enabled.
-    /// Aligns with tinyproxy C's is_anonymous_enabled().
+    /// Gets a value indicating whether anonymous enabled.
     /// </summary>
     public bool IsAnonymousEnabled => AnonymousAllowedHeaders.Count > 0;
 
     /// <summary>
-    /// Gets whether transparent proxy mode is enabled.
     /// When enabled, the proxy operates in transparent mode where client requests
     /// are redirected by firewall rules (iptables, pf, etc.) without client configuration.
     /// The proxy determines the original destination using getsockname().
-    /// Aligns with tinyproxy C's TRANSPARENT_PROXY.
     /// </summary>
     public bool IsTransparentProxyEnabled { get; init; } = false;
 
     /// <summary>
-    /// Gets whether reverse proxy mode is enabled.
-    /// Aligns with tinyproxy C's REVERSE_SUPPORT.
+    /// Gets a value indicating whether reverse proxy enabled.
     /// </summary>
     public bool IsReverseProxyEnabled { get; init; } = false;
 
     /// <summary>
-    /// Gets whether requests without reverse mappings should be rejected.
-    /// Aligns with tinyproxy C's reverseonly option.
+    /// Gets a value indicating whether reverse only.
     /// </summary>
     public bool ReverseOnly { get; init; } = false;
 
     /// <summary>
-    /// Gets the reverse proxy path mappings.
     /// Maps local paths to upstream URLs.
-    /// Aligns with tinyproxy C's reversepath_list.
     /// </summary>
     public List<ReversePathConfig> ReversePaths { get; init; } = new();
 
     /// <summary>
-    /// Gets whether reverse proxy "magic" cookie tracking is enabled.
     /// When enabled, the proxy uses a special cookie to track which reverse path
     /// a client is using.
-    /// Aligns with tinyproxy C's reversemagic.
     /// </summary>
     public bool ReverseMagicEnabled { get; init; } = false;
 
     /// <summary>
-    /// Gets the reverse base URL for rewriting redirects.
-    /// Aligns with tinyproxy C's reversebaseurl.
+    /// Gets or sets reverse base url.
     /// </summary>
     public string? ReverseBaseUrl { get; init; }
 
     /// <summary>
-    /// Gets the addresses to bind outgoing connections to.
     /// When set, outgoing connections to servers will use these source addresses.
-    /// Aligns with tinyproxy C's bind_addrs / BindSame.
     /// </summary>
     public HashSet<string> BindAddresses { get; init; } = new();
 
     /// <summary>
-    /// Gets whether to bind outgoing connections to the incoming interface IP.
-    /// Aligns with tinyproxy C's bindsame.
+    /// Gets a value indicating whether bind same.
     /// </summary>
     public bool BindSame { get; init; } = false;
 
     /// <summary>
-    /// Gets the statistics page host.
     /// When accessed, shows runtime statistics.
-    /// Aligns with tinyproxy C's statpage.
     /// </summary>
     public string? StatHost { get; init; }
 
     /// <summary>
-    /// Gets the PID file path for writing the process ID.
-    /// Aligns with tinyproxy C's pidfile.
+    /// Gets or sets pid file.
     /// </summary>
     public string? PidFile { get; init; }
 
     /// <summary>
-    /// Gets whether to use syslog for logging.
-    /// Aligns with tinyproxy C's syslog.
+    /// Gets a value indicating whether use syslog.
     /// </summary>
     public bool UseSyslog { get; init; } = false;
 
     /// <summary>
-    /// Gets the syslog server address.
-    /// Aligns with tinyproxy C's syslog configuration.
+    /// Gets or sets syslog server.
     /// </summary>
     public string? SyslogServer { get; init; }
 
     /// <summary>
-    /// Gets the syslog server port.
     /// Default is 514 (standard syslog port).
     /// </summary>
     public int SyslogPort { get; init; } = ProxyConstants.DefaultSyslogPort;
 
     /// <summary>
-    /// Gets directory path for custom error pages.
     /// When set, error pages are loaded from this directory.
-    /// Aligns with tinyproxy C's ErrorFile directive.
     /// </summary>
     public string? ErrorPagesDirectory { get; init; }
 
     /// <summary>
-    /// Gets custom error page mappings by status code.
     /// Key is HTTP status code, value is file path to custom error page.
-    /// Aligns with tinyproxy C's html-error.c.
     /// </summary>
     public Dictionary<int, string> CustomErrorPages { get; init; } = new();
 
     /// <summary>
-    /// Gets custom headers to add to all outgoing requests.
-    /// Aligns with tinyproxy C's AddHeader directive.
+    /// Gets or sets custom headers appended to proxied requests.
     /// </summary>
     public List<HttpHeader> CustomHeaders { get; init; } = new();
 
     /// <summary>
-    /// Gets whether any upstream proxy configuration exists.
+    /// Gets a value indicating whether this instance has upstream proxy configured.
     /// </summary>
     public bool HasUpstreamProxyConfigured => UpstreamProxyRules.Count > 0 || UpstreamProxy != null;
 
@@ -366,7 +316,6 @@ public sealed record Configuration
         var seenZero = false;
 
         foreach (var b in bytes)
-        {
             for (var bit = 7; bit >= 0; bit--)
             {
                 var isSet = (b & (1 << bit)) != 0;
@@ -380,7 +329,6 @@ public sealed record Configuration
                     seenZero = true;
                 }
             }
-        }
 
         return true;
     }
@@ -397,9 +345,8 @@ public sealed record Configuration
         var partialBits = prefixLength % 8;
 
         for (var i = 0; i < fullBytes; i++)
-        {
-            if (addressBytes[i] != networkBytes[i]) return false;
-        }
+            if (addressBytes[i] != networkBytes[i])
+                return false;
 
         if (partialBits == 0 || fullBytes >= addressBytes.Length) return true;
 
@@ -418,23 +365,28 @@ public sealed record Configuration
 /// </summary>
 public sealed record HttpHeader
 {
+    /// <summary>
+    /// Gets or sets name.
+    /// </summary>
     public required string Name { get; init; }
+    /// <summary>
+    /// Gets or sets value.
+    /// </summary>
     public required string Value { get; init; }
 }
 
 /// <summary>
 /// Reverse proxy path configuration.
-/// Aligns with tinyproxy C's reversepath struct.
 /// </summary>
 public sealed record ReversePathConfig
 {
     /// <summary>
-    /// Gets the local path prefix (e.g., "/app").
+    /// Gets or sets path.
     /// </summary>
     public required string Path { get; init; }
 
     /// <summary>
-    /// Gets the upstream URL to map to (e.g., "http://backend:8080").
+    /// Gets or sets url.
     /// </summary>
     public required string Url { get; init; }
 }
@@ -442,25 +394,33 @@ public sealed record ReversePathConfig
 /// <summary>
 /// Upstream proxy configuration.
 /// Supports HTTP, SOCKS4, and SOCKS5 proxies.
-/// Aligns with tinyproxy C's upstream struct with proxy_type.
 /// </summary>
 public sealed record UpstreamProxyConfig
 {
+    /// <summary>
+    /// Gets or sets host.
+    /// </summary>
     public required string Host { get; init; }
+    /// <summary>
+    /// Gets or sets port.
+    /// </summary>
     public required ushort Port { get; init; }
+    /// <summary>
+    /// Gets or sets username.
+    /// </summary>
     public string? Username { get; init; }
+    /// <summary>
+    /// Gets or sets password.
+    /// </summary>
     public string? Password { get; init; }
 
     /// <summary>
-    /// Gets the upstream proxy type.
-    /// Aligns with tinyproxy C's proxy_type enum.
+    /// Gets or sets type.
     /// </summary>
     public UpstreamProxyType Type { get; init; } = UpstreamProxyType.Http;
 
     /// <summary>
-    /// Gets the domain pattern for matching requests to this upstream proxy.
     /// When null, this is the default upstream proxy for all requests.
-    /// Aligns with tinyproxy C's upstream->target (hostspec).
     /// </summary>
     public string? Domain { get; init; }
 }
@@ -472,12 +432,11 @@ public sealed record UpstreamProxyConfig
 public sealed record UpstreamProxyRuleConfig
 {
     /// <summary>
-    /// Gets the domain/hostspec matcher. Null means default rule.
+    /// Gets or sets domain.
     /// </summary>
     public string? Domain { get; init; }
 
     /// <summary>
-    /// Gets the upstream proxy to use for this rule.
     /// Null means "upstream none" (bypass).
     /// </summary>
     public UpstreamProxyConfig? Proxy { get; init; }
@@ -501,7 +460,6 @@ public sealed record AclRuleConfig
 
 /// <summary>
 /// Upstream proxy type.
-/// Aligns with tinyproxy C's proxy_type enum.
 /// </summary>
 public enum UpstreamProxyType
 {
@@ -531,8 +489,17 @@ public enum UpstreamProxyType
 /// </summary>
 public sealed record BasicAuthConfig
 {
+    /// <summary>
+    /// Gets or sets username.
+    /// </summary>
     public required string Username { get; init; }
+    /// <summary>
+    /// Gets or sets password.
+    /// </summary>
     public required string Password { get; init; }
+    /// <summary>
+    /// Gets or sets realm.
+    /// </summary>
     public string? Realm { get; init; } = "TinyProxy";
 }
 
@@ -542,6 +509,12 @@ public sealed record BasicAuthConfig
 /// </summary>
 public sealed record BasicAuthUser
 {
+    /// <summary>
+    /// Gets or sets username.
+    /// </summary>
     public required string Username { get; init; }
+    /// <summary>
+    /// Gets or sets password.
+    /// </summary>
     public required string Password { get; init; }
 }

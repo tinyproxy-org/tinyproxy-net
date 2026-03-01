@@ -2,7 +2,6 @@ namespace TinyProxy.Metrics;
 
 /// <summary>
 /// Proxy statistics and metrics.
-/// Aligns with tinyproxy C's stats.c
 /// </summary>
 public sealed class Stats
 {
@@ -16,55 +15,52 @@ public sealed class Stats
     private long _refusedConnections;
 
     /// <summary>
-    /// Gets the total number of connections handled.
+    /// Gets total accepted connection count.
     /// </summary>
     public long TotalConnections => Interlocked.Read(ref _totalConnections);
 
     /// <summary>
-    /// Gets the current number of active connections.
+    /// Gets current active connection count.
     /// </summary>
     public long ActiveConnections => Interlocked.Read(ref _activeConnections);
 
     /// <summary>
-    /// Gets the total number of requests processed.
+    /// Gets total handled request count.
     /// </summary>
     public long TotalRequests => Interlocked.Read(ref _totalRequests);
 
     /// <summary>
-    /// Gets the total bytes sent to clients.
+    /// Gets total outbound bytes.
     /// </summary>
     public long BytesSent => Interlocked.Read(ref _totalBytesSent);
 
     /// <summary>
-    /// Gets the total bytes received from clients.
+    /// Gets total inbound bytes.
     /// </summary>
     public long BytesReceived => Interlocked.Read(ref _totalBytesReceived);
 
     /// <summary>
-    /// Alias for BytesSent for compatibility.
+    /// Alias for BytesSent.
     /// </summary>
     public long TotalBytesSent => BytesSent;
 
     /// <summary>
-    /// Alias for BytesReceived for compatibility.
+    /// Alias for BytesReceived.
     /// </summary>
     public long TotalBytesReceived => BytesReceived;
 
     /// <summary>
-    /// Gets the number of failed requests.
-    /// Aligns with tinyproxy C's STAT_BADCONN.
+    /// Gets total failed request count.
     /// </summary>
     public long FailedRequests => Interlocked.Read(ref _failedRequests);
 
     /// <summary>
-    /// Gets the number of denied requests (access control).
-    /// Aligns with tinyproxy C's STAT_DENIED.
+    /// Gets total denied request count.
     /// </summary>
     public long DeniedRequests => Interlocked.Read(ref _deniedRequests);
 
     /// <summary>
-    /// Gets the number of refused connections (overload).
-    /// Aligns with tinyproxy C's STAT_REFUSE.
+    /// Gets total refused connection count.
     /// </summary>
     public long RefusedConnections => Interlocked.Read(ref _refusedConnections);
 
@@ -119,7 +115,6 @@ public sealed class Stats
 
     /// <summary>
     /// Increments the denied request count.
-    /// Aligns with tinyproxy C's STAT_DENIED.
     /// </summary>
     public void IncrementDeniedRequests()
     {
@@ -128,7 +123,6 @@ public sealed class Stats
 
     /// <summary>
     /// Increments the refused connections count.
-    /// Aligns with tinyproxy C's STAT_REFUSE.
     /// </summary>
     public void IncrementRefusedConnections()
     {
@@ -136,7 +130,7 @@ public sealed class Stats
     }
 
     /// <summary>
-    /// Gets a snapshot of current statistics.
+    /// Gets snapshot.
     /// </summary>
     public StatsSnapshot GetSnapshot()
     {
@@ -165,6 +159,9 @@ public sealed record StatsSnapshot(
     long DeniedRequests = 0,
     long RefusedConnections = 0)
 {
+    /// <summary>
+    /// Returns a string representation of this instance.
+    /// </summary>
     public override string ToString()
     {
         return $"Stats: Connections={TotalConnections} (Active={ActiveConnections}), " +

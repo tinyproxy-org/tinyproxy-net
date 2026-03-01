@@ -2,13 +2,11 @@ namespace TinyProxy.Core;
 
 /// <summary>
 /// Text manipulation utilities.
-/// Aligns with tinyproxy C's text.c functionality.
 /// </summary>
 public static class TextUtils
 {
     /// <summary>
     /// Removes any newline or carriage-return characters from the end of a string.
-    /// Aligns with tinyproxy C's chomp() function from text.c.
     /// </summary>
     /// <param name="buffer">The buffer to chomp</param>
     /// <param name="length">The current length of the buffer (not including null terminator)</param>
@@ -56,7 +54,6 @@ public static class TextUtils
 
     /// <summary>
     /// Copies a string to a destination buffer with null termination.
-    /// Aligns with OpenBSD's strlcpy() function.
     /// </summary>
     /// <param name="dst">Destination buffer</param>
     /// <param name="src">Source string</param>
@@ -105,7 +102,6 @@ public static class TextUtils
     {
         if (a == b) return true;
 
-        // Convert to uppercase for comparison
         var upperA = ToUpper(a);
         var upperB = ToUpper(b);
 
@@ -129,10 +125,8 @@ public static class TextUtils
         var start = 0;
         var end = span.Length;
 
-        // Trim leading whitespace
         while (start < end && (span[start] == ' ' || span[start] == '\t')) start++;
 
-        // Trim trailing whitespace
         while (end > start && (span[end - 1] == ' ' || span[end - 1] == '\t' ||
                                span[end - 1] == '\r' || span[end - 1] == '\n'))
             end--;
@@ -141,7 +135,6 @@ public static class TextUtils
     }
 
     /// <summary>
-    /// Parses a host:port string.
     /// Handles "example.com", "example.com:80", "[::1]:8080" formats.
     /// </summary>
     /// <param name="input">The input string to parse</param>
@@ -156,8 +149,8 @@ public static class TextUtils
 
         if (string.IsNullOrWhiteSpace(input)) return false;
 
-        // Aligns with tinyproxy C's strip_username_password():
-        // remove optional userinfo prefix before host parsing.
+
+        // Remove optional userinfo before host parsing.
         var atIndex = input.IndexOf('@');
         if (atIndex >= 0)
         {
@@ -165,7 +158,6 @@ public static class TextUtils
             input = input[(atIndex + 1)..];
         }
 
-        // Handle IPv6 addresses: [::1]:port or [::1]
         if (input.StartsWith('['))
         {
             var bracketEnd = input.IndexOf(']');
@@ -181,20 +173,13 @@ public static class TextUtils
         }
         else
         {
-            // Handle IPv4 or hostname:port
-            // Use LastIndexOf to handle IPv6 without brackets (rare but possible)
             var colonIndex = input.LastIndexOf(':');
             if (colonIndex > 0)
             {
-                // Aligns with tinyproxy C's strip_return_port():
-                // split host at the last colon first, then parse port if valid.
                 host = input.Substring(0, colonIndex);
 
                 var portStr = input.Substring(colonIndex + 1);
-                if (int.TryParse(portStr, out var parsedPort) && parsedPort > 0 && parsedPort <= 65535)
-                {
-                    port = parsedPort;
-                }
+                if (int.TryParse(portStr, out var parsedPort) && parsedPort > 0 && parsedPort <= 65535) port = parsedPort;
             }
             else
             {

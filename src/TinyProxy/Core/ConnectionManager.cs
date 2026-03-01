@@ -13,6 +13,9 @@ public sealed class ConnectionManager
     private readonly ConcurrentDictionary<string, int> _activeConnectionsByIp = new(StringComparer.Ordinal);
     private int _totalActiveConnections = 0;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConnectionManager"/> class.
+    /// </summary>
     public ConnectionManager(Configuration config, ILogger logger)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -21,17 +24,17 @@ public sealed class ConnectionManager
     }
 
     /// <summary>
-    /// Gets the current number of active connections.
+    /// Gets active count.
     /// </summary>
     public int ActiveCount => _totalActiveConnections;
 
     /// <summary>
-    /// Gets the maximum allowed concurrent connections.
+    /// Gets max clients.
     /// </summary>
     public int MaxClients => _config.MaxClients;
 
     /// <summary>
-    /// Gets the maximum allowed concurrent connections per IP.
+    /// Gets max clients per ip.
     /// </summary>
     public int MaxClientsPerIp => _config.MaxClientsPerIp;
 
@@ -118,12 +121,18 @@ public sealed class ConnectionSlot : IDisposable
     private readonly string? _clientIp;
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConnectionSlot"/> class.
+    /// </summary>
     public ConnectionSlot(ConnectionManager manager, string? clientIp)
     {
         _manager = manager;
         _clientIp = clientIp;
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

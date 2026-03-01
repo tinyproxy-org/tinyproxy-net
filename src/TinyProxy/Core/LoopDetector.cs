@@ -2,7 +2,6 @@ namespace TinyProxy.Core;
 
 /// <summary>
 /// Detects and prevents proxy chaining loops.
-/// Aligns with tinyproxy C's loop.c functionality.
 /// </summary>
 public sealed class LoopDetector
 {
@@ -19,10 +18,16 @@ public sealed class LoopDetector
         public required DateTimeOffset Timestamp { get; init; }
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LoopDetector"/> class.
+    /// </summary>
     public LoopDetector() : this(TimeSpan.FromSeconds(15), static () => DateTimeOffset.UtcNow)
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LoopDetector"/> class.
+    /// </summary>
     public LoopDetector(TimeSpan loopTimeout, Func<DateTimeOffset> utcNow)
     {
         if (loopTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(loopTimeout));
@@ -53,8 +58,7 @@ public sealed class LoopDetector
     }
 
     /// <summary>
-    /// Checks whether an incoming client endpoint matches a recently recorded local outbound endpoint.
-    /// This mirrors tinyproxy C's connection_loops() behavior.
+    /// Determines whether loop detected.
     /// </summary>
     public bool IsLoopDetected(EndPoint? remoteEndpoint)
     {

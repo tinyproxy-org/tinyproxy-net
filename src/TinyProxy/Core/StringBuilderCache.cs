@@ -55,7 +55,7 @@ public static class StringBuilderCache
     }
 
     /// <summary>
-    /// Gets the string and releases the builder back to cache.
+    /// Gets string and release.
     /// </summary>
     public static string GetStringAndRelease(StringBuilder sb)
     {

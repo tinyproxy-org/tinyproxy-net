@@ -36,19 +36,16 @@ public static class ProxyConstants
 
     /// <summary>
     /// Maximum number of headers to parse in a single request.
-    /// Aligns with tinyproxy C's MAX_HEADERS in reqs.c.
     /// </summary>
     public const int MaxHeaders = 10000;
 
     /// <summary>
     /// Maximum number of parsed header entries to store.
-    /// Aligns with tinyproxy C's pseudomap MAX_SIZE in pseudomap.c.
     /// </summary>
     public const int MaxStoredHeaders = 256;
 
     /// <summary>
     /// Maximum URL length allowed.
-    /// Aligns with typical web server limits.
     /// </summary>
     public const int MaxUrlLength = 2048;
 
@@ -128,7 +125,7 @@ public static class ProxyConstants
         "Upgrade"
     };
 
-    // HashSet version for O(1) lookup
+    // Kept alongside array constants to preserve order definitions and fast lookups.
     public static readonly HashSet<string> HopByHopHeadersSet = new(HopByHopHeaders, StringComparer.OrdinalIgnoreCase);
 
     // Headers that should be filtered in anonymous mode.

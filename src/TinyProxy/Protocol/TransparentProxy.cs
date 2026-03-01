@@ -2,8 +2,6 @@ namespace TinyProxy.Protocol;
 
 /// <summary>
 /// Handles transparent proxy mode.
-/// Aligns with tinyproxy C's transparent-proxy.c
-///
 /// Transparent proxy requires firewall configuration (iptables/pf) to redirect
 /// traffic to the proxy without client configuration. The proxy determines the
 /// original destination using getsockname() on the client socket.
@@ -13,6 +11,9 @@ public sealed class TransparentProxy
     private readonly ILogger _logger;
     private readonly Configuration _config;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TransparentProxy"/> class.
+    /// </summary>
     public TransparentProxy(ILogger logger, Configuration config)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -21,19 +22,16 @@ public sealed class TransparentProxy
 
     /// <summary>
     /// Extracts the target destination from a transparent proxy connection.
-    /// Aligns with tinyproxy C's do_transparent_proxy() function.
     /// </summary>
     /// <param name="clientSocket">The client socket (connection was redirected by firewall)</param>
     /// <param name="request">The parsed HTTP request</param>
     /// <returns>The target host and port, or null if unable to determine</returns>
     public (string host, int port)? GetTransparentDestination(Socket clientSocket, HttpRequest request)
     {
-        // First, check if the request has a Host header
         var hostHeader = GetHostHeader(request.Headers);
         if (!string.IsNullOrEmpty(hostHeader))
             if (TryParseHostPort(hostHeader, out var host, out var port))
             {
-                // Prevent connections to the proxy itself.
                 if (IsLocalAddress(host))
                 {
                     _logger.LogWarning($"Transparent proxy destination {host} is local, rejecting");
@@ -44,12 +42,8 @@ public sealed class TransparentProxy
                 return (host, port);
             }
 
-        // No Host header, use getsockname() to get the original destination
-        // This is the key to transparent proxy - the firewall redirected the connection
-        // to us, but the socket still knows the original destination
         if (TryGetOriginalDestination(clientSocket, out var destHost, out var destPort))
         {
-            // Prevent connections to the proxy itself
             if (IsLocalAddress(destHost))
             {
                 _logger.LogWarning($"Transparent proxy destination {destHost} is local, rejecting");
@@ -74,24 +68,19 @@ public sealed class TransparentProxy
             if (string.Equals(kvp.Key, "Host", StringComparison.OrdinalIgnoreCase))
             {
                 var span = kvp.Value.IsSingleSegment ? kvp.Value.FirstSpan : kvp.Value.ToArray();
-                return System.Text.Encoding.ASCII.GetString(span);
+                return Encoding.ASCII.GetString(span);
             }
 
         return null;
     }
 
-    /// <summary>
-    /// Parses a host:port string using shared utility.
-    /// </summary>
     private static bool TryParseHostPort(string hostHeader, out string host, out int port)
     {
         return TextUtils.TryParseHostPort(hostHeader, 80, out host, out port);
     }
 
     /// <summary>
-    /// Gets the original destination address using getsockname().
     /// This only works when the connection was redirected by firewall rules (iptables REDIRECT, pf rdr, etc.).
-    /// Aligns with tinyproxy C's use of getsockname() in do_transparent_proxy().
     /// </summary>
     private bool TryGetOriginalDestination(Socket clientSocket, out string host, out int port)
     {
@@ -103,8 +92,7 @@ public sealed class TransparentProxy
             var endPoint = clientSocket.LocalEndPoint as IPEndPoint;
             if (endPoint == null) return false;
 
-            // In transparent proxy mode, LocalEndPoint gives us the ORIGINAL destination
-            // (not the proxy's listening address) because of the firewall redirect
+            // In transparent mode, LocalEndPoint carries the original destination.
             host = endPoint.Address.ToString();
             port = endPoint.Port;
             return true;
@@ -117,13 +105,10 @@ public sealed class TransparentProxy
     }
 
     /// <summary>
-    /// Checks if the given address is a local address (proxy's listen address).
     /// Prevents loops where client tries to connect to the proxy itself.
-    /// Aligns with tinyproxy C's check against listen_addrs.
     /// </summary>
     private bool IsLocalAddress(string host)
     {
-        // Check against configured listen addresses
         if (_config.ListenAddress != null)
             try
             {
@@ -132,15 +117,12 @@ public sealed class TransparentProxy
 
                 if (listenIp.Equals(checkIp)) return true;
 
-                // Check for loopback
                 if (IPAddress.IsLoopback(checkIp)) return true;
             }
             catch
             {
-                // Parse failed, ignore
             }
 
-        // Also check common local addresses
         return host is "127.0.0.1" or "::1" or "localhost";
     }
 
@@ -151,12 +133,11 @@ public sealed class TransparentProxy
     /// </summary>
     public string BuildAbsoluteUri(string requestUri, string host, int port, string? path)
     {
-        // If the request URI is already absolute, use it as-is
         if (requestUri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             requestUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             return requestUri;
 
-        // Aligns with tinyproxy C build_url(): always emit explicit port.
+
         var pathStr = path ?? requestUri;
 
         return $"http://{host}:{port}{pathStr}";

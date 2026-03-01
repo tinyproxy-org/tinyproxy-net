@@ -17,6 +17,9 @@ public sealed class HealthCheck : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _serveTask;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="HealthCheck"/> class.
+    /// </summary>
     public HealthCheck(Configuration config, ConnectionManager connectionManager, ILogger logger, int healthPort = 9091)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -26,9 +29,6 @@ public sealed class HealthCheck : IDisposable
         _listener.Prefixes.Add($"http://+:{healthPort}/");
     }
 
-    /// <summary>
-    /// Gets the current uptime in seconds.
-    /// </summary>
     private static string GetUptime()
     {
         return ((long)(DateTime.UtcNow - ProcessStartTime).TotalSeconds).ToString();
@@ -101,6 +101,9 @@ public sealed class HealthCheck : IDisposable
         ctx.Response.Close();
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         _cts.Cancel();
@@ -118,6 +121,13 @@ public sealed class HealthCheck : IDisposable
     }
 }
 
+/// <summary>
+/// Represents the health endpoint payload.
+/// </summary>
+/// <param name="status">Current service health status.</param>
+/// <param name="activeConnections">Current active connection count.</param>
+/// <param name="maxConnections">Configured maximum connection count.</param>
+/// <param name="uptimeSeconds">Process uptime in seconds.</param>
 public sealed record HealthResponse(
     string status,
     string activeConnections,

@@ -2,33 +2,31 @@ namespace TinyProxy.Filter;
 
 /// <summary>
 /// Filters CONNECT requests by allowed ports.
-/// Aligns with tinyproxy C's connect-ports.c implementation.
 /// </summary>
 public sealed class ConnectFilter
 {
     private readonly Configuration _config;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConnectFilter"/> class.
+    /// </summary>
     public ConnectFilter(Configuration config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
     /// <summary>
-    /// Checks if the port is allowed for CONNECT requests.
-    /// Aligns with tinyproxy C's check_allowed_connect_ports function.
     /// If no ports are configured, all ports are allowed.
     /// </summary>
     public bool IsPortAllowed(ushort port)
     {
-        // If no ports configured, allow all ports
         if (_config.AllowedConnectPorts.Count == 0) return true;
 
         return _config.AllowedConnectPorts.Contains(port);
     }
 
     /// <summary>
-    /// Adds a port to the allowed list.
-    /// Aligns with tinyproxy C's add_connect_port_allowed function.
+    /// Adds allowed port.
     /// </summary>
     public static void AddAllowedPort(ushort port, HashSet<ushort> allowedPorts)
     {
@@ -36,7 +34,6 @@ public sealed class ConnectFilter
     }
 
     /// <summary>
-    /// Gets the default CONNECT port set.
     /// Empty means all ports are allowed unless ConnectPort directives are configured.
     /// </summary>
     public static HashSet<ushort> DefaultPorts => new();

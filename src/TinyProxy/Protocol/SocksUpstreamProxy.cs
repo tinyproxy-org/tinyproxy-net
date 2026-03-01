@@ -4,7 +4,6 @@ namespace TinyProxy.Protocol;
 
 /// <summary>
 /// Handles SOCKS4 and SOCKS5 upstream proxy connections.
-/// Aligns with tinyproxy C's upstream.c SOCKS support.
 /// </summary>
 public sealed class SocksUpstreamProxy
 {
@@ -12,6 +11,9 @@ public sealed class SocksUpstreamProxy
     private readonly UpstreamProxyConfig _config;
     private readonly TimeSpan _timeout;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SocksUpstreamProxy"/> class.
+    /// </summary>
     public SocksUpstreamProxy(ILogger logger, UpstreamProxyConfig config, TimeSpan timeout)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -33,7 +35,6 @@ public sealed class SocksUpstreamProxy
 
         try
         {
-            // Connect to SOCKS proxy with timeout
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
             cts.CancelAfter(_timeout);
 
@@ -43,18 +44,14 @@ public sealed class SocksUpstreamProxy
             {
                 var bindAddress = bindConfig.BindAddresses.FirstOrDefault();
                 if (!string.IsNullOrEmpty(bindAddress))
-                {
                     await socket.ConnectAndBindAsync(
                         _config.Host,
                         _config.Port,
                         _timeout,
                         bindAddress,
                         cts.Token).ConfigureAwait(false);
-                }
                 else
-                {
                     await socket.ConnectAsync(_config.Host, _config.Port, cts.Token).ConfigureAwait(false);
-                }
             }
             else
             {
@@ -88,7 +85,7 @@ public sealed class SocksUpstreamProxy
 
     /// <summary>
     /// Performs SOCKS4 handshake.
-    /// tinyproxy C uses SOCKS4a framing (fake destination IP + hostname) for SOCKS4 upstream.
+    /// Uses SOCKS4a framing with placeholder destination IP plus hostname.
     /// </summary>
     private async ValueTask Socks4HandshakeAsync(Socket socket, string targetHost, int targetPort, CancellationToken token)
     {
@@ -101,7 +98,7 @@ public sealed class SocksUpstreamProxy
         // | VN | CD | DSTPORT |      DSTIP        | USERID       |NULL|
         // +----+----+----+----+----+----+----+----+----+----+....+----+....+----+
         //    1    1      2           4           variable       1   HOST    1
-        // tinyproxy C uses SOCKS4a DSTIP 0.0.0.1 and appends host.
+        // SOCKS4a uses DSTIP 0.0.0.1 and appends host after USERID.
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
         cts.CancelAfter(_timeout);
@@ -176,7 +173,6 @@ public sealed class SocksUpstreamProxy
 
     /// <summary>
     /// Performs SOCKS5 handshake.
-    /// Aligns with SOCKS5 protocol specification (RFC 1928).
     /// </summary>
     private async ValueTask Socks5HandshakeAsync(Socket socket, string targetHost, int targetPort, CancellationToken token)
     {
@@ -311,7 +307,6 @@ public sealed class SocksUpstreamProxy
 
     /// <summary>
     /// Performs SOCKS5 username/password authentication.
-    /// Aligns with RFC 1929.
     /// </summary>
     private async ValueTask PerformUsernamePasswordAuthAsync(Socket socket, CancellationToken token)
     {
@@ -379,7 +374,7 @@ public sealed class SocksUpstreamProxy
         ms.WriteByte(0); // Reserved
 
         // Address type and address
-        if (System.Net.IPAddress.TryParse(targetHost, out var ipAddress))
+        if (IPAddress.TryParse(targetHost, out var ipAddress))
         {
             if (ipAddress.AddressFamily == AddressFamily.InterNetwork)
             {

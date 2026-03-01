@@ -2,14 +2,12 @@ namespace TinyProxy.Protocol;
 
 /// <summary>
 /// Handles reverse proxy mode.
-/// Aligns with tinyproxy C's reverse-proxy.c
-///
 /// Reverse proxy allows mapping local paths to upstream servers,
 /// making the proxy act as a reverse proxy for specific paths.
 /// </summary>
 public sealed class ReverseProxy
 {
-    private const string ReverseCookieName = "yummy_magical_cookie"; // Aligns with tinyproxy C's REVERSE_COOKIE
+    private const string ReverseCookieName = "yummy_magical_cookie";
 
     private readonly ILogger _logger;
     private readonly Configuration _config;
@@ -24,8 +22,16 @@ public sealed class ReverseProxy
         Rewritten
     }
 
+    /// <summary>
+    /// Represents the result of a reverse-proxy rewrite attempt.
+    /// </summary>
+    /// <param name="Status">The rewrite decision status.</param>
+    /// <param name="Request">The rewritten or original request.</param>
     public readonly record struct RewriteResult(RewriteStatus Status, HttpRequest Request);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ReverseProxy"/> class.
+    /// </summary>
     public ReverseProxy(
         ILogger logger,
         Configuration config,
@@ -43,7 +49,6 @@ public sealed class ReverseProxy
     /// <summary>
     /// Tries to handle the request as a reverse proxy request.
     /// Returns true if the request was handled (matches a reverse path), false otherwise.
-    /// Aligns with tinyproxy C's reverse_rewrite_url().
     /// </summary>
     public async ValueTask<bool> TryHandleAsync(
         Connection connection,
@@ -54,7 +59,6 @@ public sealed class ReverseProxy
         if (rewriteResult.Status == RewriteStatus.NotMatched) return false;
         if (rewriteResult.Status == RewriteStatus.ResponseSent) return true;
 
-        // Forward the rewritten request
         var forwarder = new HttpForwarder(_logger, _config, _stats, _accessLogger, _clientIp);
         await forwarder.ForwardAsync(connection, rewriteResult.Request, token).ConfigureAwait(false);
 
@@ -71,16 +75,13 @@ public sealed class ReverseProxy
         HttpRequest request,
         CancellationToken token)
     {
-        // Reverse proxy requests must start with /
         if (string.IsNullOrEmpty(request.Uri) || request.Uri[0] != '/')
             return new RewriteResult(RewriteStatus.NotMatched, request);
 
-        // Find matching reverse path
         var matchedPath = FindReversePath(request.Uri);
         var matchedByCookie = false;
         if (matchedPath == null)
         {
-            // Try magic cookie if enabled
             if (_config.ReverseMagicEnabled)
             {
                 matchedPath = FindReversePathByCookie(request.Headers);
@@ -93,7 +94,6 @@ public sealed class ReverseProxy
 
         if (!matchedByCookie && request.Uri.Length == matchedPath.Path.Length - 1)
         {
-            // Redirect to add trailing slash (aligns with tinyproxy C behavior)
             await SendRedirectAsync(connection.ClientSocket, matchedPath.Path, token).ConfigureAwait(false);
             _accessLogger.LogAccess(_clientIp,
                 request.GetMethodToken(),
@@ -104,14 +104,12 @@ public sealed class ReverseProxy
             return new RewriteResult(RewriteStatus.ResponseSent, request);
         }
 
-        // Rewrite the URL
         var rewrittenUrl = matchedByCookie
             ? RewriteUrlFromMagicCookie(request.Uri, matchedPath)
             : RewriteUrl(request.Uri, matchedPath);
 
         if (_config.Verbose) _logger.LogInfo($"Reverse proxy: {request.Uri} -> {rewrittenUrl}");
 
-        // Create a modified request with the rewritten URL
         var modifiedRequest = request.WithUri(rewrittenUrl);
         if (_config.ReverseMagicEnabled)
             modifiedRequest = modifiedRequest.WithReverseMagicCookiePath(matchedPath.Path);
@@ -121,7 +119,6 @@ public sealed class ReverseProxy
 
     /// <summary>
     /// Finds the reverse path configuration that matches the request URI.
-    /// Aligns with tinyproxy C's reversepath_get().
     /// </summary>
     private ReversePathConfig? FindReversePath(string uri)
     {
@@ -133,17 +130,11 @@ public sealed class ReverseProxy
             int compareLength;
 
             if (uriLen == pathLen - 1)
-            {
                 compareLength = uriLen;
-            }
             else if (pathLen <= uriLen)
-            {
                 compareLength = pathLen;
-            }
             else
-            {
                 continue;
-            }
 
             if (uri.AsSpan(0, compareLength).SequenceEqual(path.AsSpan(0, compareLength)))
                 return reversePath;
@@ -154,7 +145,6 @@ public sealed class ReverseProxy
 
     /// <summary>
     /// Finds the reverse path configuration using the magic cookie.
-    /// Aligns with tinyproxy C's reversemagic handling.
     /// </summary>
     private ReversePathConfig? FindReversePathByCookie(IDictionary<string, ReadOnlySequence<byte>> headers)
     {
@@ -164,7 +154,6 @@ public sealed class ReverseProxy
                 var span = kvp.Value.IsSingleSegment ? kvp.Value.FirstSpan : kvp.Value.ToArray();
                 var cookie = Encoding.ASCII.GetString(span);
 
-                // Look for REVERSE_COOKIE=path pattern
                 var pattern = $"{ReverseCookieName}=";
                 var idx = cookie.IndexOf(pattern, StringComparison.Ordinal);
                 if (idx >= 0)
@@ -187,20 +176,18 @@ public sealed class ReverseProxy
 
     /// <summary>
     /// Rewrites the request URL using the reverse path configuration.
-    /// Aligns with tinyproxy C's reverse_rewrite_url().
     /// </summary>
     private static string RewriteUrl(string uri, ReversePathConfig reversePath)
     {
-        // Strip the reverse path prefix from the URI and append to upstream URL
         var remainingPath = uri.Substring(reversePath.Path.Length);
 
-        // tinyproxy C concatenates configured URL and remainder directly.
+        // Concatenate reverse target URL and the unmatched URI remainder.
         return $"{reversePath.Url}{remainingPath}";
     }
 
     private static string RewriteUrlFromMagicCookie(string uri, ReversePathConfig reversePath)
     {
-        // tinyproxy C cookie fallback appends URL without the leading slash.
+        // In magic-cookie mode, strip the leading slash before concatenation.
         var remainingPath = uri.Length > 0 ? uri[1..] : string.Empty;
         return $"{reversePath.Url}{remainingPath}";
     }

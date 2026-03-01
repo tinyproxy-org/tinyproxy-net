@@ -2,7 +2,6 @@ namespace TinyProxy.Metrics;
 
 /// <summary>
 /// Exposes Prometheus metrics for monitoring.
-/// Aligns with modern observability standards.
 /// </summary>
 public sealed class PrometheusMetrics : IDisposable
 {
@@ -12,6 +11,9 @@ public sealed class PrometheusMetrics : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _serveTask;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="PrometheusMetrics"/> class.
+    /// </summary>
     public PrometheusMetrics(Stats stats, ILogger logger, int metricsPort = 9090)
     {
         _stats = stats ?? throw new ArgumentNullException(nameof(stats));
@@ -118,6 +120,9 @@ public sealed class PrometheusMetrics : IDisposable
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Releases the resources used by this instance.
+    /// </summary>
     public void Dispose()
     {
         _cts.Cancel();

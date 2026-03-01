@@ -2,7 +2,6 @@ namespace TinyProxy.Protocol;
 
 /// <summary>
 /// Handles the statistics page.
-/// Aligns with tinyproxy C's stats.c showstats() function.
 /// </summary>
 public sealed class StatsHandler
 {
@@ -10,6 +9,9 @@ public sealed class StatsHandler
     private readonly Configuration _config;
     private readonly Stats _stats;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="StatsHandler"/> class.
+    /// </summary>
     public StatsHandler(ILogger logger, Configuration config, Stats stats)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));

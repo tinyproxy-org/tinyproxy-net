@@ -4,7 +4,6 @@ namespace TinyProxy.Security;
 
 /// <summary>
 /// HTTP Basic Authentication validator.
-/// Aligns with tinyproxy C's basicauth.c implementation.
 /// Supports multiple users with constant-time comparison for security.
 /// Stores passwords as byte arrays for consistent encoding.
 /// </summary>
@@ -13,6 +12,9 @@ public sealed class BasicAuth
     private readonly Configuration _config;
     private readonly List<byte[]> _encodedTokens;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="BasicAuth"/> class.
+    /// </summary>
     public BasicAuth(Configuration config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -29,7 +31,6 @@ public sealed class BasicAuth
     /// <summary>
     /// Validates the Authorization header against configured credentials.
     /// Uses constant-time comparison to prevent timing attacks.
-    /// Aligns with tinyproxy C's basicauth_check function.
     /// </summary>
     public bool Validate(string? authorizationHeader)
     {
@@ -72,7 +73,7 @@ public sealed class BasicAuth
     }
 
     /// <summary>
-    /// Gets the authentication realm for the WWW-Authenticate header.
+    /// Gets realm.
     /// </summary>
     public string GetRealm()
     {

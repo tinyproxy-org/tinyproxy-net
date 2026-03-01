@@ -4,7 +4,6 @@ namespace TinyProxy.Filter;
 
 /// <summary>
 /// IP/domain access control.
-/// Aligns with tinyproxy C's acl.c implementation.
 /// </summary>
 public sealed class AccessControl
 {
@@ -13,6 +12,9 @@ public sealed class AccessControl
     private readonly ConcurrentDictionary<string, string> _dnsCache;
     private readonly ConcurrentDictionary<string, IPAddress[]> _dnsForwardCache;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AccessControl"/> class.
+    /// </summary>
     public AccessControl(Configuration config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -24,7 +26,7 @@ public sealed class AccessControl
     }
 
     /// <summary>
-    /// Checks whether a client IP/hostname is allowed.
+    /// Determines whether allowed.
     /// </summary>
     public bool IsAllowed(string clientIp)
     {
@@ -42,12 +44,12 @@ public sealed class AccessControl
             return rule.AccessType == AccessType.Allow;
         }
 
-        // tinyproxy C default when ACL exists: deny.
+        // When ACL directives exist but no rule matches, deny by default.
         return false;
     }
 
     /// <summary>
-    /// Checks whether a client endpoint is allowed.
+    /// Determines whether allowed.
     /// </summary>
     public bool IsAllowed(EndPoint endPoint)
     {
@@ -57,7 +59,7 @@ public sealed class AccessControl
     }
 
     /// <summary>
-    /// Checks whether a client hostname is allowed.
+    /// Determines whether allowed async.
     /// </summary>
     public async Task<bool> IsAllowedAsync(string hostname, CancellationToken cancellationToken = default)
     {
@@ -89,7 +91,7 @@ public sealed class AccessControl
     }
 
     /// <summary>
-    /// Checks whether a client socket is allowed.
+    /// Determines whether allowed async.
     /// </summary>
     public async Task<bool> IsAllowedAsync(Socket socket, CancellationToken cancellationToken = default)
     {
@@ -163,8 +165,8 @@ public sealed class AccessControl
             return rules;
         }
 
-        // Backward compatibility for in-memory configs built via AllowIPs/DenyIPs.
-        // Ordering is only guaranteed when AccessRules is populated by parser.
+        // Preserve behavior for in-memory configs built via AllowIPs/DenyIPs.
+        // Deterministic rule order is only guaranteed when AccessRules is parser-populated.
         rules.AddRange(ParseRules(config.AllowIPs, AccessType.Allow));
         rules.AddRange(ParseRules(config.DenyIPs, AccessType.Deny));
         return rules;
@@ -175,9 +177,6 @@ public sealed class AccessControl
         return config.AccessRules.Count > 0 || config.AllowIPs.Count > 0 || config.DenyIPs.Count > 0;
     }
 
-    /// <summary>
-    /// Parses configuration rules into AccessRule objects.
-    /// </summary>
     private static List<AccessRule> ParseRules(IEnumerable<string> patterns, AccessType accessType)
     {
         var rules = new List<AccessRule>();
@@ -194,15 +193,13 @@ public sealed class AccessControl
     }
 
     /// <summary>
-    /// Parses a single rule pattern.
     /// Supports: IP, CIDR, wildcard (*), and domain pattern.
     /// </summary>
     private static AccessRule? ParseRule(string pattern, AccessType accessType)
     {
         pattern = pattern.Trim();
 
-        // Keep the leading dot to preserve tinyproxy C semantics:
-        // ".example.com" must not match bare "example.com".
+        // A leading-dot domain pattern is suffix-only (".example.com" does not match "example.com").
         if (pattern.StartsWith(".", StringComparison.Ordinal))
             return new AccessRule(RuleType.Domain, pattern, accessType);
 
@@ -292,9 +289,8 @@ public sealed class AccessControl
         }
 
         foreach (var address in addresses)
-        {
-            if (AreEquivalentIpAddresses(address, ipAddress)) return true;
-        }
+            if (AreEquivalentIpAddresses(address, ipAddress))
+                return true;
 
         return false;
     }
@@ -316,9 +312,8 @@ public sealed class AccessControl
         }
 
         foreach (var address in addresses)
-        {
-            if (AreEquivalentIpAddresses(address, ipAddress)) return true;
-        }
+            if (AreEquivalentIpAddresses(address, ipAddress))
+                return true;
 
         return false;
     }
@@ -337,7 +332,6 @@ public sealed class AccessControl
 
     /// <summary>
     /// Performs reverse DNS lookup with caching.
-    /// Aligns with tinyproxy C's getnameinfo call in acl_string_processing.
     /// </summary>
     private async Task<string> GetHostnameAsync(IPEndPoint endPoint, CancellationToken cancellationToken)
     {
@@ -350,7 +344,7 @@ public sealed class AccessControl
             var hostEntry = await Dns.GetHostEntryAsync(endPoint.Address.ToString(), cancellationToken).ConfigureAwait(false);
             var hostname = hostEntry.HostName;
 
-            // Cache with LRU eviction
+            // Keep cache bounded by dropping a small batch when the limit is reached.
             if (_dnsCache.Count >= ProxyConstants.MaxDnsCacheSize)
             {
                 var keysToRemove = _dnsCache.Keys.Take(100).ToList();
@@ -366,9 +360,6 @@ public sealed class AccessControl
         }
     }
 
-    /// <summary>
-    /// Checks if an IP address is within a CIDR subnet.
-    /// </summary>
     private static bool IsInSubnet(IPAddress ipAddress, IPAddress subnet, int prefixLength)
     {
         ipAddress = NormalizeIpAddress(ipAddress);
