@@ -73,7 +73,7 @@ public static class ProxyConstants
     /// <summary>
     /// Default listen port.
     /// </summary>
-    public const int DefaultPort = 8889;
+    public const int DefaultPort = 8800;
 
     /// <summary>
     /// Default maximum concurrent connections.

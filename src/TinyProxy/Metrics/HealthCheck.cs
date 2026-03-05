@@ -13,9 +13,10 @@ public sealed class HealthCheck : IDisposable
     private readonly Configuration _config;
     private readonly ConnectionManager _connectionManager;
     private readonly ILogger _logger;
+    private readonly int _healthPort;
     private static readonly DateTime ProcessStartTime = DateTime.UtcNow;
-    private readonly CancellationTokenSource _cts = new();
     private Task? _serveTask;
+    private bool _disposed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HealthCheck"/> class.
@@ -25,6 +26,9 @@ public sealed class HealthCheck : IDisposable
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        if (healthPort <= 0 || healthPort > ushort.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(healthPort), healthPort, "Port must be between 1 and 65535.");
+        _healthPort = healthPort;
         _listener = new HttpListener();
         _listener.Prefixes.Add($"http://+:{healthPort}/");
     }
@@ -37,11 +41,14 @@ public sealed class HealthCheck : IDisposable
     /// <summary>
     /// Starts health check server asynchronously.
     /// </summary>
-    public async Task StartAsync(CancellationToken token = default)
+    public Task StartAsync(CancellationToken token = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        token.ThrowIfCancellationRequested();
         _listener.Start();
-        _serveTask = Task.Run(() => ServeLoopAsync(token), token);
-        _logger.LogInfo($"Health check server started on port 9091");
+        _serveTask = Task.Run(() => ServeLoopAsync(token));
+        _logger.LogInfo($"Health check server started on port {_healthPort}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -106,7 +113,9 @@ public sealed class HealthCheck : IDisposable
     /// </summary>
     public void Dispose()
     {
-        _cts.Cancel();
+        if (_disposed) return;
+        _disposed = true;
+
         try
         {
             _listener.Stop();
@@ -115,9 +124,6 @@ public sealed class HealthCheck : IDisposable
         catch
         {
         }
-
-        _serveTask?.Dispose();
-        _cts?.Dispose();
     }
 }
 

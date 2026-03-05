@@ -78,13 +78,13 @@ public sealed class ReverseProxy
         if (string.IsNullOrEmpty(request.Uri) || request.Uri[0] != '/')
             return new RewriteResult(RewriteStatus.NotMatched, request);
 
-        var matchedPath = FindReversePath(request.Uri);
+        var matchedPath = FindReversePath(request.Uri.AsSpan());
         var matchedByCookie = false;
         if (matchedPath == null)
         {
             if (_config.ReverseMagicEnabled)
             {
-                matchedPath = FindReversePathByCookie(request.Headers);
+                matchedPath = FindReversePathByCookie(request);
                 matchedByCookie = matchedPath != null;
             }
 
@@ -92,9 +92,11 @@ public sealed class ReverseProxy
                 return new RewriteResult(RewriteStatus.NotMatched, request);
         }
 
-        if (!matchedByCookie && request.Uri.Length == matchedPath.Path.Length - 1)
+        var requestPathLength = GetPathLength(request.Uri);
+        if (!matchedByCookie && requestPathLength == matchedPath.Path.Length - 1)
         {
-            await SendRedirectAsync(connection.ClientSocket, matchedPath.Path, token).ConfigureAwait(false);
+            var redirectLocation = BuildRedirectLocation(request.Uri, requestPathLength, matchedPath.Path);
+            await SendRedirectAsync(connection.ClientSocket, redirectLocation, token).ConfigureAwait(false);
             _accessLogger.LogAccess(_clientIp,
                 request.GetMethodToken(),
                 request.Uri,
@@ -120,12 +122,14 @@ public sealed class ReverseProxy
     /// <summary>
     /// Finds the reverse path configuration that matches the request URI.
     /// </summary>
-    private ReversePathConfig? FindReversePath(string uri)
+    private ReversePathConfig? FindReversePath(ReadOnlySpan<char> uri)
     {
+        var uriPathLength = GetPathLength(uri);
+
         foreach (var reversePath in _config.ReversePaths)
         {
-            var path = reversePath.Path;
-            var uriLen = uri.Length;
+            var path = reversePath.Path.AsSpan();
+            var uriLen = uriPathLength;
             var pathLen = path.Length;
             int compareLength;
 
@@ -136,17 +140,44 @@ public sealed class ReverseProxy
             else
                 continue;
 
-            if (uri.AsSpan(0, compareLength).SequenceEqual(path.AsSpan(0, compareLength)))
+            if (uri[..compareLength].SequenceEqual(path[..compareLength]))
                 return reversePath;
         }
 
         return null;
     }
 
+    private static int GetPathLength(ReadOnlySpan<char> uri)
+    {
+        var queryIndex = uri.IndexOf('?');
+        var fragmentIndex = uri.IndexOf('#');
+
+        if (queryIndex < 0) return fragmentIndex >= 0 ? fragmentIndex : uri.Length;
+        if (fragmentIndex < 0) return queryIndex;
+        return Math.Min(queryIndex, fragmentIndex);
+    }
+
+    private static string BuildRedirectLocation(string requestUri, int pathLength, string normalizedPath)
+    {
+        if (pathLength >= requestUri.Length) return normalizedPath;
+        return string.Concat(normalizedPath, requestUri.AsSpan(pathLength));
+    }
+
     /// <summary>
     /// Finds the reverse path configuration using the magic cookie.
     /// </summary>
-    private ReversePathConfig? FindReversePathByCookie(IDictionary<string, ReadOnlySequence<byte>> headers)
+    private ReversePathConfig? FindReversePathByCookie(HttpRequest request)
+    {
+        if (request.HeaderLines.Count > 0)
+        {
+            var fromHeaderLines = FindReversePathByCookieHeaders(request.HeaderLines);
+            if (fromHeaderLines != null) return fromHeaderLines;
+        }
+
+        return FindReversePathByCookieHeaders(request.Headers);
+    }
+
+    private ReversePathConfig? FindReversePathByCookieHeaders(IEnumerable<KeyValuePair<string, ReadOnlySequence<byte>>> headers)
     {
         foreach (var kvp in headers)
             if (string.Equals(kvp.Key, "Cookie", StringComparison.OrdinalIgnoreCase))
@@ -154,12 +185,8 @@ public sealed class ReverseProxy
                 var span = kvp.Value.IsSingleSegment ? kvp.Value.FirstSpan : kvp.Value.ToArray();
                 var cookie = Encoding.ASCII.GetString(span);
 
-                var pattern = $"{ReverseCookieName}=";
-                var idx = cookie.IndexOf(pattern, StringComparison.Ordinal);
-                if (idx >= 0)
+                if (TryGetCookieValue(cookie.AsSpan(), ReverseCookieName.AsSpan(), out var cookieValue))
                 {
-                    var startIdx = idx + pattern.Length;
-                    var cookieValue = cookie.Substring(startIdx).TrimStart();
                     var reversePath = FindReversePath(cookieValue);
                     if (reversePath != null)
                     {
@@ -167,11 +194,54 @@ public sealed class ReverseProxy
                         return reversePath;
                     }
                 }
-
-                break;
             }
 
         return null;
+    }
+
+    private static bool TryGetCookieValue(ReadOnlySpan<char> cookies, ReadOnlySpan<char> cookieName, out ReadOnlySpan<char> value)
+    {
+        value = default;
+
+        var index = 0;
+        while (index < cookies.Length)
+        {
+            while (index < cookies.Length && (cookies[index] == ';' || char.IsWhiteSpace(cookies[index])))
+                index++;
+            if (index >= cookies.Length) break;
+
+            var nameStart = index;
+            while (index < cookies.Length && cookies[index] != '=' && cookies[index] != ';')
+                index++;
+            if (index >= cookies.Length || cookies[index] != '=')
+            {
+                while (index < cookies.Length && cookies[index] != ';')
+                    index++;
+                continue;
+            }
+
+            var name = cookies[nameStart..index].Trim();
+            index++; // '='
+
+            var valueStart = index;
+            while (index < cookies.Length && cookies[index] != ';')
+                index++;
+
+            if (!name.Equals(cookieName, StringComparison.Ordinal))
+                continue;
+
+            var cookieValue = cookies[valueStart..index].Trim();
+            if (cookieValue.Length >= 2 && cookieValue[0] == '"' && cookieValue[^1] == '"')
+                cookieValue = cookieValue[1..^1].Trim();
+
+            if (cookieValue.IsEmpty)
+                continue;
+
+            value = cookieValue;
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -195,7 +265,7 @@ public sealed class ReverseProxy
     /// <summary>
     /// Sends a redirect response to add the trailing slash.
     /// </summary>
-    private async ValueTask SendRedirectAsync(Socket socket, string path, CancellationToken token)
+    private async ValueTask SendRedirectAsync(Socket socket, string location, CancellationToken token)
     {
         var html = $@"
 <!DOCTYPE html>
@@ -203,12 +273,12 @@ public sealed class ReverseProxy
 <head><title>301 Moved Permanently</title></head>
 <body>
 <h1>Moved Permanently</h1>
-<p>The resource has been moved to <a href=""{path}"">{path}</a>.</p>
+<p>The resource has been moved to <a href=""{location}"">{location}</a>.</p>
 </body>
 </html>";
 
         var response = $"HTTP/1.1 301 Moved Permanently\r\n" +
-                       $"Location: {path}\r\n" +
+                       $"Location: {location}\r\n" +
                        $"Content-Type: text/html\r\n" +
                        $"Content-Length: {Encoding.UTF8.GetByteCount(html)}\r\n" +
                        $"Connection: close\r\n" +

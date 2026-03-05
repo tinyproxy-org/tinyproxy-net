@@ -8,8 +8,9 @@ public sealed class PrometheusMetrics : IDisposable
     private readonly HttpListener _listener;
     private readonly Stats _stats;
     private readonly ILogger _logger;
-    private readonly CancellationTokenSource _cts = new();
+    private readonly int _metricsPort;
     private Task? _serveTask;
+    private bool _disposed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PrometheusMetrics"/> class.
@@ -18,6 +19,9 @@ public sealed class PrometheusMetrics : IDisposable
     {
         _stats = stats ?? throw new ArgumentNullException(nameof(stats));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        if (metricsPort <= 0 || metricsPort > ushort.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(metricsPort), metricsPort, "Port must be between 1 and 65535.");
+        _metricsPort = metricsPort;
         _listener = new HttpListener();
         _listener.Prefixes.Add($"http://+:{metricsPort}/");
     }
@@ -25,11 +29,14 @@ public sealed class PrometheusMetrics : IDisposable
     /// <summary>
     /// Starts the metrics server asynchronously.
     /// </summary>
-    public async Task StartAsync(CancellationToken token = default)
+    public Task StartAsync(CancellationToken token = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        token.ThrowIfCancellationRequested();
         _listener.Start();
-        _serveTask = Task.Run(() => ServeLoopAsync(token), token);
-        _logger.LogInfo($"Prometheus metrics server started on port 9090");
+        _serveTask = Task.Run(() => ServeLoopAsync(token));
+        _logger.LogInfo($"Prometheus metrics server started on port {_metricsPort}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -125,7 +132,9 @@ public sealed class PrometheusMetrics : IDisposable
     /// </summary>
     public void Dispose()
     {
-        _cts.Cancel();
+        if (_disposed) return;
+        _disposed = true;
+
         try
         {
             _listener.Stop();
@@ -134,8 +143,5 @@ public sealed class PrometheusMetrics : IDisposable
         catch
         {
         }
-
-        _serveTask?.Dispose();
-        _cts?.Dispose();
     }
 }

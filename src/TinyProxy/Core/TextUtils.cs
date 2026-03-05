@@ -148,6 +148,7 @@ public static class TextUtils
         port = defaultPort;
 
         if (string.IsNullOrWhiteSpace(input)) return false;
+        input = input.Trim();
 
 
         // Remove optional userinfo before host parsing.
@@ -165,8 +166,14 @@ public static class TextUtils
 
             host = input.Substring(1, bracketEnd - 1);
 
-            if (bracketEnd + 1 < input.Length && input[bracketEnd + 1] == ':')
+            if (bracketEnd + 1 < input.Length)
             {
+                if (input[bracketEnd + 1] != ':')
+                {
+                    host = string.Empty;
+                    return false;
+                }
+
                 var portStr = input.Substring(bracketEnd + 2);
                 if (int.TryParse(portStr, out var parsedPort) && parsedPort > 0 && parsedPort <= 65535) port = parsedPort;
             }
@@ -174,7 +181,18 @@ public static class TextUtils
         else
         {
             var colonIndex = input.LastIndexOf(':');
-            if (colonIndex > 0)
+            var firstColonIndex = input.IndexOf(':');
+            var hasMultipleColons = firstColonIndex >= 0 && firstColonIndex != colonIndex;
+
+            if (hasMultipleColons)
+            {
+                // Unbracketed IPv6 literal: keep full host and use default port.
+                if (!IPAddress.TryParse(input, out var parsedAddress) || parsedAddress.AddressFamily != AddressFamily.InterNetworkV6)
+                    return false;
+
+                host = input;
+            }
+            else if (colonIndex > 0)
             {
                 host = input.Substring(0, colonIndex);
 

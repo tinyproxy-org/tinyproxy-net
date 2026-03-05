@@ -123,7 +123,8 @@ public sealed class TransparentProxy
             {
             }
 
-        return host is "127.0.0.1" or "::1" or "localhost";
+        return host is "127.0.0.1" or "::1" ||
+               string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -139,7 +140,14 @@ public sealed class TransparentProxy
 
 
         var pathStr = path ?? requestUri;
+        var hostPart = host;
+        if (IPAddress.TryParse(host, out var address) &&
+            address.AddressFamily == AddressFamily.InterNetworkV6 &&
+            !host.StartsWith('['))
+        {
+            hostPart = $"[{host}]";
+        }
 
-        return $"http://{host}:{port}{pathStr}";
+        return $"http://{hostPart}:{port}{pathStr}";
     }
 }
